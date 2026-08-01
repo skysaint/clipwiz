@@ -1,5 +1,5 @@
-来源：https://en.wikipedia.org/wiki/Environment_variable#Default_values
-下表是windows下的环境变量含义。
+Source: https://en.wikipedia.org/wiki/Environment_variable#Default_values
+Default values of Windows environment variables.
 
 |Variable|Locale specific|Windows XP (CMD)|Windows Vista and later (CMD)|
 |:----|:----|:----|:----|
