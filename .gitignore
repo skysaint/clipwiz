@@ -1,0 +1,14 @@
+# 构建产物
+build/
+
+# 运行时数据（如果在本目录调试）
+data/
+portable.txt
+
+# IDE / 编辑器
+.vs/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
