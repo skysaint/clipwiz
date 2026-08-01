@@ -1,5 +1,169 @@
 # ClipWiz
 
+A lightweight Windows clipboard manager. Single executable, zero dependencies, < 8MB resident memory.
+
+---
+
+## Background
+
+Many everyday workflows involve repeatedly pasting the same fixed text: access passwords for certain websites, authorization codes, template snippets, frequently used paths. The Windows clipboard only holds one item at a time, which makes this tedious.
+
+Existing tools like Ditto handle multi-item clipboards, but they tend to be bulky and suffer from a critical flaw — pinned items get silently cleaned up after a while despite being marked as permanent.
+
+ClipWiz was built around a simple set of requirements:
+
+- Maintain a history of clipboard items for quick reuse
+- Allow critical items to be pinned so they are never automatically removed
+- Bind global hotkeys to pinned items for one-keystroke pasting into any window
+
+On top of that, ClipWiz pursues extreme lightness: pure Win32 API, no runtime dependencies, a single exe of a few hundred KB that runs from anywhere.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+| Item | Requirement |
+| --- | --- |
+| OS | Windows 10 1809+ / Windows 11, x64 |
+| Compiler | Visual Studio 2022 (MSVC + Windows SDK) |
+| Build tool | CMake 3.20+ (included with VS installer) |
+
+### Build
+
+Double-click `build-tool.bat` in the project root and select **2 (Build)**. CMake configuration runs automatically on first build.
+
+Command line:
+
+```cmd
+build-tool.bat build
+```
+
+Or manually:
+
+```cmd
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+### Output
+
+`build\Release\clipwiz.exe` — single file, statically linked CRT, no VC runtime required. Copy it anywhere and run.
+
+### Usage
+
+The program lives in the system tray. Click the tray icon to open the quick-paste popup; right-click for the context menu.
+
+---
+
+## Features
+
+| Feature | Description |
+| --- | --- |
+| Clipboard monitoring | Automatically records every copy operation: text, images, HTML, RTF, file lists |
+| Quick-paste popup | Tray click to open; keyword filtering, number shortcuts, mouse operations |
+| Pin items | Any item can be pinned; pinned items are never auto-deleted and don't count toward history limit |
+| Global hotkeys | Up to 10 pinned positions, each bindable to a global hotkey for instant paste |
+| Multi-format | CF_UNICODETEXT / CF_DIB / HTML Format / RTF / CF_HDROP |
+| Persistence | Custom binary format; data survives restarts |
+| Async disk writes | Background thread handles I/O; UI thread never blocks |
+| Large data protection | Prompts cleanup when data exceeds threshold (configurable) |
+| Internationalization | English built-in; .lng language files for extensions; Simplified Chinese included |
+| Auto-start | Registry Run key; no admin privileges needed |
+| Dark mode | Follows system theme in real time |
+| High DPI | Per-Monitor V2; crisp rendering across multi-monitor setups |
+
+### Design Boundaries
+
+- Fully offline — no network, no telemetry, no cloud sync
+- No third-party libraries or runtimes (no Qt / .NET / Electron)
+- No plugin system, scripting, or multi-device sync
+- No groups / tags / folders
+- No clipboard content restoration after paste
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│          Hidden main window (message hub)        │
+└──┬──────────────┬──────────────┬────────────────┘
+   │              │              │
+┌──▼──────┐  ┌───▼─────┐  ┌────▼────┐
+│clipboard│  │ hotkey  │  │  tray   │
+└──┬──────┘  └───┬─────┘  └────┬────┘
+   │              │              │
+┌──▼──────────────▼──────────────▼────┐
+│           store (item database)      │
+│     in-memory vector + store.dat     │
+└──┬──────────────────────────────┬───┘
+   │                              │
+┌──▼────────┐            ┌───────▼────────┐
+│   popup   │            │   settings     │
+└──┬────────┘            └────────────────┘
+   │
+┌──▼────────┐     ┌─────────────┐
+│   paste   │     │ asyncwriter │
+└───────────┘     └─────────────┘
+```
+
+- Single process; main logic runs in the UI thread message loop
+- Disk writes handled by a dedicated AsyncWriter thread; UI thread only serializes in memory
+- Image encoding/decoding via WIC (built into Windows)
+- All UI is native Win32 controls + GDI custom drawing
+
+### Source Layout
+
+```
+src/
+  main.cpp           Entry, single-instance check, message loop
+  app.h/.cpp         Global state, message dispatch
+  store.h/.cpp       Item database, serialization, eviction
+  clipboard.h/.cpp   Clipboard monitoring and read/write
+  hotkey.h/.cpp      Global hotkey management
+  paste.h/.cpp       Paste execution
+  popup.h/.cpp       Quick-paste popup window
+  settings.h/.cpp    Configuration and settings dialog
+  imagecodec.h/.cpp  WIC image codec
+  tray.h/.cpp        Tray icon
+  i18n.h/.cpp        Internationalization
+  asyncwriter.h/.cpp Async disk writer
+  util.h/.cpp        Utility functions
+lang/
+  zh-CN.lng          Simplified Chinese language pack
+```
+
+---
+
+## Technical Details
+
+Data formats, storage strategy, paste pipeline, hotkey mechanics, and UI implementation details are documented in [doc/technical.md](doc/technical.md).
+
+---
+
+## Project Structure
+
+```
+clipwiz/
+├── CMakeLists.txt        Build configuration
+├── build-tool.bat        One-click build script
+├── README.md
+├── .gitignore
+├── doc/
+│   ├── technical.md      Detailed technical documentation
+│   └── variables_win.md  Windows environment variables reference (reserved)
+├── lang/
+│   └── zh-CN.lng         Simplified Chinese language pack
+└── src/                  All source code
+```
+
+---
+---
+
+# ClipWiz
+
 轻量级 Windows 剪贴板管理工具。单文件、零依赖、常驻内存 < 8MB。
 
 ---
@@ -34,7 +198,7 @@ ClipWiz 的原始需求很简单：
 
 双击项目根目录的 `build-tool.bat`，在交互菜单中选择 **2 (Build)**。首次构建会自动执行 CMake 配置。
 
-也可命令行操作：
+命令行：
 
 ```cmd
 build-tool.bat build
@@ -159,8 +323,5 @@ clipwiz/
 │   └── variables_win.md  Windows 环境变量参考（预留）
 ├── lang/
 │   └── zh-CN.lng         简体中文语言包
-├── tools/
-│   ├── make_icon.ps1     图标生成工具
-│   └── dump_ico.ps1      图标导出工具
 └── src/                  全部源码
 ```
