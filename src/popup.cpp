@@ -708,7 +708,8 @@ void PositionWindow() {
 
 LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
-        case WM_KEYDOWN: {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
             UINT vk = static_cast<UINT>(wparam);
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
