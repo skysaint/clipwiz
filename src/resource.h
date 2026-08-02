@@ -23,6 +23,7 @@
 #define IDC_FONT_BTN                1007
 #define IDC_FONT_RESET              1008
 #define IDC_DATADIR                 1009
+#define IDC_DATADIR_OPEN            1010
 
 // Types page controls
 #define IDC_TYPELIST                1020

@@ -801,6 +801,43 @@ Store::LoadResult Store::Load() {
     return LoadResult::Ok;
 }
 
+bool Store::LoadItemsFrom(const std::wstring& path, std::vector<Item>& out) {
+    out.clear();
+    std::vector<uint8_t> buf;
+    if (!util::ReadWholeFile(path, buf)) return false;
+    if (buf.size() < kHeaderSize || memcmp(buf.data(), kMagic, 4) != 0) return false;
+
+    size_t pos = 4;
+    uint32_t version = 0, count = 0;
+    uint64_t nextId = 0;
+    if (!Take(buf, pos, version) || !Take(buf, pos, count) || !Take(buf, pos, nextId))
+        return false;
+    if (version != kStoreVersion || count > kMaxItemCount) return false;
+    pos = kHeaderSize;
+
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        Item item;
+        uint32_t kind = 0, flags = 0, dataLen = 0;
+        if (!Take(buf, pos, item.id) || !Take(buf, pos, kind) || !Take(buf, pos, flags) ||
+            !Take(buf, pos, item.createdAt) || !Take(buf, pos, item.usedAt) ||
+            !Take(buf, pos, item.imgW) || !Take(buf, pos, item.imgH) ||
+            !Take(buf, pos, dataLen))
+            return false;
+        if (kind > static_cast<uint32_t>(ItemKind::FileDrop) || dataLen > kMaxDataLen)
+            return false;
+        if (pos + dataLen > buf.size()) return false;
+        item.kind = static_cast<ItemKind>(kind);
+        item.pinned = (flags & kFlagPinned) != 0;
+        item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
+        pos += dataLen;
+        item.hash = util::Hash64(item.data.data(), item.data.size());
+        item.preview = MakeItemPreview(item);
+        out.push_back(std::move(item));
+    }
+    return true;
+}
+
 bool Store::Save() {
     ExpireCheck();
     std::vector<uint8_t> buf = Serialize();
@@ -841,4 +878,37 @@ uint64_t Store::TotalDataSize() const {
         total += item.data.size();
     }
     return total;
+}
+
+std::vector<uint8_t> Store::SerializeItems(const std::vector<Item>& items) {
+    uint64_t nextId = 1;
+    for (const Item& item : items) {
+        if (item.id >= nextId) nextId = item.id + 1;
+    }
+
+    std::vector<uint8_t> buf;
+    size_t estimate = kHeaderSize;
+    for (const Item& item : items) {
+        estimate += 44 + item.data.size();
+    }
+    buf.reserve(estimate);
+
+    buf.insert(buf.end(), kMagic, kMagic + 4);
+    Append<uint32_t>(buf, kStoreVersion);
+    Append<uint32_t>(buf, static_cast<uint32_t>(items.size()));
+    Append<uint64_t>(buf, nextId);
+    buf.resize(kHeaderSize, 0);
+
+    for (const Item& item : items) {
+        Append<uint64_t>(buf, item.id);
+        Append<uint32_t>(buf, static_cast<uint32_t>(item.kind));
+        Append<uint32_t>(buf, item.pinned ? kFlagPinned : 0u);
+        Append<uint64_t>(buf, item.createdAt);
+        Append<uint64_t>(buf, item.usedAt);
+        Append<uint32_t>(buf, item.imgW);
+        Append<uint32_t>(buf, item.imgH);
+        Append<uint32_t>(buf, static_cast<uint32_t>(item.data.size()));
+        buf.insert(buf.end(), item.data.begin(), item.data.end());
+    }
+    return buf;
 }

@@ -7,6 +7,10 @@
 #include <cstdarg>
 #include <cstdio>
 
+#include "i18n.h"
+#include "conflict.h"
+#include "store.h"
+
 namespace util {
 namespace {
 
@@ -39,17 +43,31 @@ std::wstring ExeDir() {
     return pos == std::wstring::npos ? std::wstring() : path.substr(0, pos);
 }
 
+// Check if any data file exists next to exe (indicating portable mode)
+bool HasPortableMarker(const std::wstring& exeDir) {
+    // config.ini or store.dat
+    if (GetFileAttributesW((exeDir + L"\\config.ini").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+    if (GetFileAttributesW((exeDir + L"\\store.dat").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+    // lang\*.lng
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((exeDir + L"\\lang\\*.lng").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        FindClose(h);
+        return true;
+    }
+    return false;
+}
+
 const std::wstring& DataDir() {
     if (!g_dataDir.empty()) {
         return g_dataDir;
     }
-    // Auto-detect: if config.ini exists next to exe → portable mode
     std::wstring exeDir = ExeDir();
-    std::wstring portableCfg = exeDir + L"\\config.ini";
-    if (GetFileAttributesW(portableCfg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (HasPortableMarker(exeDir)) {
         g_dataDir = exeDir;
     } else {
-        // Default: %APPDATA%\ClipWiz
         g_dataDir = AppDataDir();
     }
     return g_dataDir;
@@ -81,6 +99,64 @@ bool MigrateDataDir(bool toPortable) {
         return true;  // Already there
     }
     EnsureDir(dst);
+
+    // Handle store.dat conflict: both sides have one
+    std::wstring srcDat = src + L"\\store.dat";
+    std::wstring dstDat = dst + L"\\store.dat";
+    bool srcHas = GetFileAttributesW(srcDat.c_str()) != INVALID_FILE_ATTRIBUTES;
+    bool dstHas = GetFileAttributesW(dstDat.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (srcHas && dstHas) {
+        std::wstring userDir = AppDataDir();
+        std::wstring progDir = ExeDir();
+        ConflictChoice choice = ShowConflictDialog(nullptr, userDir, progDir);
+        if (choice == ConflictChoice::Cancel) {
+            return false;  // User aborted
+        }
+        if (choice == ConflictChoice::UseMerged) {
+            // Merge both, write to dst, remove src's
+            std::vector<Item> leftItems, rightItems;
+            Store::LoadItemsFrom(userDir + L"\\store.dat", leftItems);
+            Store::LoadItemsFrom(progDir + L"\\store.dat", rightItems);
+            // Dedup by hash: pinned group + unpinned group
+            std::vector<Item> merged;
+            std::vector<uint64_t> seen;
+            auto addUnique = [&](const std::vector<Item>& items) {
+                for (const Item& it : items) {
+                    bool dup = false;
+                    for (uint64_t h : seen) {
+                        if (h == it.hash) { dup = true; break; }
+                    }
+                    if (!dup) {
+                        seen.push_back(it.hash);
+                        merged.push_back(it);
+                    }
+                }
+            };
+            // Pinned first (from both), then unpinned (from both)
+            std::vector<Item> lp, rp, lu, ru;
+            for (auto& it : leftItems) { if (it.pinned) lp.push_back(std::move(it)); else lu.push_back(std::move(it)); }
+            for (auto& it : rightItems) { if (it.pinned) rp.push_back(std::move(it)); else ru.push_back(std::move(it)); }
+            addUnique(lp);
+            addUnique(rp);
+            addUnique(lu);
+            addUnique(ru);
+            // Serialize and write to dst
+            std::vector<uint8_t> buf = Store::SerializeItems(merged);
+            WriteFileAtomic(dstDat, buf.data(), buf.size());
+            // Remove src's so it won't be moved over
+            DeleteFileW(srcDat.c_str());
+        } else {
+            // UseLeft = keep user dir, UseRight = keep program dir
+            std::wstring keepDir = (choice == ConflictChoice::UseLeft) ? userDir : progDir;
+            if (keepDir == dst) {
+                // Chosen data is already at destination, delete source's
+                DeleteFileW(srcDat.c_str());
+            } else {
+                // Chosen data is at source, delete destination's (let migration move it)
+                DeleteFileW(dstDat.c_str());
+            }
+        }
+    }
 
     // Build double-null-terminated source file list
     const wchar_t* files[] = {L"config.ini", L"store.dat", L"clipwiz.log"};

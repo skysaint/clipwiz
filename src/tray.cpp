@@ -122,8 +122,8 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
     AppendMenuW(menu, MF_STRING, CmdAbout, i18n::T("tray.about"));
     AppendMenuW(menu, MF_STRING, CmdExit, i18n::T("tray.exit"));
 
-    // No longer force SetForegroundWindow to avoid other app flickering
-    // If menu doesn't disappear issue reappears, consider other solutions
+    // SetForegroundWindow is required for TrackPopupMenu to dismiss on clicking elsewhere
+    SetForegroundWindow(owner);
     POINT pt = {};
     GetCursorPos(&pt);
     const UINT flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY |

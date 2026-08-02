@@ -58,8 +58,8 @@ void Init() {
         DeleteFileW(logPath.c_str());
     }
 
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, logPath.c_str(), L"a") == 0 && f) {
+    FILE* f = _wfsopen(logPath.c_str(), L"a", _SH_DENYNO);
+    if (f) {
         g_file = f;
         // Startup marker
         SYSTEMTIME st;

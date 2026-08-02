@@ -3,6 +3,7 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 
 #include "resource.h"
 
@@ -174,6 +175,8 @@ void PopulateControls(HWND hwnd) {
     SendMessageW(cbData, CB_ADDSTRING, 0,
                  reinterpret_cast<LPARAM>(i18n::T("settings.data_portable")));
     SendMessageW(cbData, CB_SETCURSEL, util::IsPortable() ? 1 : 0, 0);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.open_dir"),
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kBtnH, IDC_DATADIR_OPEN);
     y += kRowH + 8;
 
     // ===================== Section 2: Shortcuts =====================
@@ -317,6 +320,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 g_cfg->fontName.clear();
                 g_cfg->fontSize = 0;
                 SetDlgItemTextW(hwnd, IDC_FONT_BTN, i18n::T("settings.font_default_val"));
+                return TRUE;
+            }
+            if (id == IDC_DATADIR_OPEN) {
+                ShellExecuteW(hwnd, L"open", util::DataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return TRUE;
             }
             break;
