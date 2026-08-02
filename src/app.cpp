@@ -439,7 +439,9 @@ void App::CopyItem(uint64_t id) {
 }
 
 void App::TogglePin(uint64_t id) {
-    store_.SetPinned(id, !store_.Find(id)->pinned);
+    const Item* item = store_.Find(id);
+    if (!item) return;
+    store_.SetPinned(id, !item->pinned);
     popup::OnDataChanged();
     SaveNow();
     RegisterAllHotkeys(false);

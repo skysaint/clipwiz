@@ -5,7 +5,7 @@
 
 namespace raii {
 
-// GlobalLock wrapper — fixes resource leak issues in clipboard.cpp
+// GlobalLock wrapper — RAII guard for GlobalLock/GlobalUnlock
 class GlobalLockGuard {
 public:
     explicit GlobalLockGuard(HGLOBAL h) : ptr_(GlobalLock(h)), handle_(h) {}

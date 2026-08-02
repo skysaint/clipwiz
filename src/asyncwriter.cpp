@@ -32,7 +32,7 @@ void AsyncWriter::Stop() {
     stop_ = true;
     LeaveCriticalSection(&cs_);
     SetEvent(event_);
-    // No need to wait for thread; data already saved synchronously on exit
+    WaitForSingleObject(thread_, 5000);
     CloseHandle(thread_);
     thread_ = nullptr;
     if (event_) {

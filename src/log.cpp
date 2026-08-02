@@ -3,10 +3,6 @@
 
 #include <cstdarg>
 #include <cstdio>
-#include <cstddef>
-#include <chrono>
-#include <ctime>
-#include <mutex>
 
 #include "util.h"
 
@@ -14,11 +10,13 @@ namespace logger {
 namespace {
 
 FILE* g_file = nullptr;
-std::mutex g_mutex;
-Level g_minLevel = Level::Info;  // Release builds only log Info and above
-bool g_initialized = false;
+CRITICAL_SECTION g_cs;
+Level g_minLevel = Level::Info;
+bool g_inited = false;
 
-const char* LevelToString(Level level) {
+constexpr int64_t kMaxLogBytes = 1024 * 1024;  // 1 MB
+
+const char* LevelStr(Level level) {
     switch (level) {
         case Level::Debug:   return "DEBUG";
         case Level::Info:    return "INFO ";
@@ -28,103 +26,90 @@ const char* LevelToString(Level level) {
     }
 }
 
-// Safe file open function
-FILE* SafeOpenFile(const wchar_t* path, const wchar_t* mode) {
-    FILE* file = nullptr;
-    errno_t err = _wfopen_s(&file, path, mode);
-    if (err != 0 || file == nullptr) {
-        return nullptr;
-    }
-    return file;
-}
-
-// Safe time retrieval function
-void SafeGetTime(char* timeStr, size_t bufferSize) {
-    time_t now;
-    time(&now);
-    struct tm timeInfo;
-    localtime_s(&timeInfo, &now);
-    strftime(timeStr, bufferSize, "%H:%M:%S", &timeInfo);
+// Format current time as "HH:MM:SS.mmm"
+void FormatTime(char* buf, size_t bufSize) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    _snprintf_s(buf, bufSize, _TRUNCATE, "%02d:%02d:%02d.%03d",
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 }
 
 void WriteToFile(const char* line) {
-    if (!g_file) return;
-    
-    std::lock_guard<std::mutex> lock(g_mutex);
-    fprintf(g_file, "%s\n", line);
-    fflush(g_file);  // Flush immediately to prevent log loss on crash
+    EnterCriticalSection(&g_cs);
+    if (g_file) {
+        fprintf(g_file, "%s\n", line);
+        fflush(g_file);
+    }
+    LeaveCriticalSection(&g_cs);
 }
 
 }  // namespace
 
 void Init() {
-    if (g_initialized) return;
-    
+    if (g_inited) return;
+
+    InitializeCriticalSection(&g_cs);
+
     std::wstring logPath = util::DataDir() + L"\\clipwiz.log";
-    
-    // Ensure directory exists
     util::EnsureDir(util::DataDir());
-    
-    // Use safe file open function
-    g_file = SafeOpenFile(logPath.c_str(), L"a");
-    
-    if (g_file) {
-        // Write startup marker
-        time_t now;
-        time(&now);
-        struct tm timeInfo;
-        localtime_s(&timeInfo, &now);
-        char time_str[64];
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &timeInfo);
-        fprintf(g_file, "\n=== ClipWiz started at %s ===\n", time_str);
+
+    // Truncate if log exceeds size limit
+    if (util::FileSizeOf(logPath) > static_cast<uint64_t>(kMaxLogBytes)) {
+        DeleteFileW(logPath.c_str());
+    }
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, logPath.c_str(), L"a") == 0 && f) {
+        g_file = f;
+        // Startup marker
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(g_file, "\n=== ClipWiz started %04d-%02d-%02d %02d:%02d:%02d ===\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         fflush(g_file);
     }
-    
-    g_initialized = true;
+
+    g_inited = true;
 }
 
-void Write(Level level, const char* file, int line, const char* func, const char* fmt, ...) {
-    (void)func;  // Not using function name for now, suppress warning
-    if (!g_initialized || level < g_minLevel) return;
-    
-    // Get current time (safe version)
-    char time_str[32];
-    SafeGetTime(time_str, sizeof(time_str));
-    
-    // Extract filename (strip path)
-    const char* filename = file;
-    const char* lastSlash = file;
-    while (*file) {
-        if (*file == '/' || *file == '\\') lastSlash = file + 1;
-        file++;
+void Write(Level level, const char* file, int line, const char* fmt, ...) {
+    if (!g_inited || level < g_minLevel) return;
+
+    char timeBuf[32];
+    FormatTime(timeBuf, sizeof(timeBuf));
+
+    // Strip path, keep filename only
+    const char* baseName = file;
+    for (const char* p = file; *p; ++p) {
+        if (*p == '/' || *p == '\\') baseName = p + 1;
     }
-    filename = lastSlash;
-    
-    // Format log message
-    char line_buf[1024];
-    char msg_buf[512];
-    
+
+    char msgBuf[512];
     va_list args;
     va_start(args, fmt);
-    vsnprintf_s(msg_buf, sizeof(msg_buf), _TRUNCATE, fmt, args);
+    vsnprintf_s(msgBuf, sizeof(msgBuf), _TRUNCATE, fmt, args);
     va_end(args);
-    
-    _snprintf_s(line_buf, sizeof(line_buf), _TRUNCATE, "[%s] [%s] [%s:%d] %s",
-              time_str, LevelToString(level), filename, line, msg_buf);
-    
-    WriteToFile(line_buf);
+
+    char lineBuf[1024];
+    _snprintf_s(lineBuf, sizeof(lineBuf), _TRUNCATE, "[%s] [%s] [%s:%d] %s",
+                timeBuf, LevelStr(level), baseName, line, msgBuf);
+
+    WriteToFile(lineBuf);
 }
 
 void Shutdown() {
-    if (!g_initialized) return;
-    
+    if (!g_inited) return;
+
+    EnterCriticalSection(&g_cs);
     if (g_file) {
         fprintf(g_file, "=== ClipWiz shutdown ===\n");
         fclose(g_file);
         g_file = nullptr;
     }
-    
-    g_initialized = false;
+    LeaveCriticalSection(&g_cs);
+
+    DeleteCriticalSection(&g_cs);
+    g_inited = false;
 }
 
 }  // namespace logger

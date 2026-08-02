@@ -1,7 +1,6 @@
 // log.h — Lightweight logging system
 #pragma once
 
-#include <string>
 #include <cstdint>
 
 namespace logger {
@@ -18,15 +17,15 @@ enum class Level : uint8_t {
 void Init();
 
 // Write log entry
-void Write(Level level, const char* file, int line, const char* func, const char* fmt, ...);
+void Write(Level level, const char* file, int line, const char* fmt, ...);
 
 // Shutdown the logging system (call at program exit)
 void Shutdown();
 
 // Convenience macros
-#define LOG_DEBUG(fmt, ...)   logger::Write(logger::Level::Debug,   __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)    logger::Write(logger::Level::Info,    __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#define LOG_WARNING(fmt, ...) logger::Write(logger::Level::Warning, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...)   logger::Write(logger::Level::Error,   __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...)   logger::Write(logger::Level::Debug,   __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)    logger::Write(logger::Level::Info,    __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...) logger::Write(logger::Level::Warning, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)   logger::Write(logger::Level::Error,   __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 }  // namespace logger

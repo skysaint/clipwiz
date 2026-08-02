@@ -295,14 +295,6 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     SetTextColor(dc, selected ? theme.selFg : theme.fg);
     DrawTextW(dc, item->preview.c_str(), -1, &textRc,
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-    // Positional hotkey hint (only first 10 pinned items)
-    if (row.pinned) {
-        int pinnedIdx = index;  // Pinned section starts from 0
-        if (pinnedIdx < 10) {
-            // Get hotkey text from host (via config) — simplified: not drawn, shown in tray menu
-        }
-    }
 }
 
 void PaintAll(HDC target, const RECT& client) {
@@ -947,6 +939,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         case WM_DESTROY:
             HidePreview();
+            if (g.edit && g.editOrig) {
+                SetWindowLongPtrW(g.edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g.editOrig));
+                g.editOrig = nullptr;
+            }
             if (g.font) { DeleteObject(g.font); g.font = nullptr; }
             if (g.fontSmall) { DeleteObject(g.fontSmall); g.fontSmall = nullptr; }
             if (g.editBg) { DeleteObject(g.editBg); g.editBg = nullptr; }

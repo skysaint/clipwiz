@@ -124,7 +124,7 @@ void PopulateControls(HWND hwnd) {
                            kFieldX, y, kFieldW, 120, IDC_LANGUAGE);
     SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.lang_auto")));
     SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
-    SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"\x7B80\x4F53\x4E2D\x6587"));
+    SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"简体中文"));
     int langSel = 0;
     if (cfg.language == L"en") langSel = 1;
     else if (cfg.language == L"zh-CN") langSel = 2;
