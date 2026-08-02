@@ -9,6 +9,11 @@ IDI_APPICON             ICON            "clipwiz.ico"
 1                       RT_MANIFEST     "app.manifest"
 
 /////////////////////////////////////////////////////////////////////////////
+// Built-in language pack (compiled from lang/zh-CN.lng)
+
+IDR_LNG_ZHCN            RCDATA          "../lang/zh-CN.lng"
+
+/////////////////////////////////////////////////////////////////////////////
 // Version information
 
 VS_VERSION_INFO VERSIONINFO

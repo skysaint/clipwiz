@@ -5,6 +5,9 @@
 // Icon resources
 #define IDI_APPICON                 101
 
+// Built-in language resources (compiled from lang/*.lng)
+#define IDR_LNG_ZHCN                2001
+
 // Settings dialog pages
 #define IDD_PAGE_GENERAL            201
 #define IDD_PAGE_TYPES              202
@@ -20,7 +23,6 @@
 #define IDC_FONT_BTN                1007
 #define IDC_FONT_RESET              1008
 #define IDC_DATADIR                 1009
-#define IDC_DATADIR_BTN             1010
 
 // Types page controls
 #define IDC_TYPELIST                1020

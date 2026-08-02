@@ -1,6 +1,9 @@
 // util.cpp
 #include "util.h"
 
+#include <shlobj.h>
+#include <shellapi.h>
+
 #include <cstdarg>
 #include <cstdio>
 
@@ -40,8 +43,15 @@ const std::wstring& DataDir() {
     if (!g_dataDir.empty()) {
         return g_dataDir;
     }
-    // Default is exe directory, maximally portable
-    g_dataDir = ExeDir();
+    // Auto-detect: if config.ini exists next to exe → portable mode
+    std::wstring exeDir = ExeDir();
+    std::wstring portableCfg = exeDir + L"\\config.ini";
+    if (GetFileAttributesW(portableCfg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        g_dataDir = exeDir;
+    } else {
+        // Default: %APPDATA%\ClipWiz
+        g_dataDir = AppDataDir();
+    }
     return g_dataDir;
 }
 
@@ -49,6 +59,59 @@ void SetDataDir(const std::wstring& dir) {
     if (!dir.empty()) {
         g_dataDir = dir;
     }
+}
+
+std::wstring AppDataDir() {
+    wchar_t path[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path))) {
+        return std::wstring(path) + L"\\ClipWiz";
+    }
+    // Fallback: exe directory
+    return ExeDir();
+}
+
+bool IsPortable() {
+    return DataDir() == ExeDir();
+}
+
+bool MigrateDataDir(bool toPortable) {
+    std::wstring src = DataDir();
+    std::wstring dst = toPortable ? ExeDir() : AppDataDir();
+    if (src == dst) {
+        return true;  // Already there
+    }
+    EnsureDir(dst);
+
+    // Build double-null-terminated source file list
+    const wchar_t* files[] = {L"config.ini", L"store.dat", L"clipwiz.log"};
+    std::wstring fromList;
+    for (const wchar_t* f : files) {
+        std::wstring full = src + L"\\" + f;
+        if (GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            fromList += full;
+            fromList += L'\0';
+        }
+    }
+    if (fromList.empty()) {
+        g_dataDir = dst;
+        return true;  // Nothing to move
+    }
+    fromList += L'\0';  // Double-null terminator
+
+    // Destination directory (double-null terminated)
+    std::wstring toDir = dst;
+    toDir += L'\0';
+
+    SHFILEOPSTRUCTW op = {};
+    op.hwnd = nullptr;
+    op.wFunc = FO_MOVE;
+    op.pFrom = fromList.c_str();
+    op.pTo = toDir.c_str();
+    op.fFlags = FOF_SIMPLEPROGRESS | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+    int result = SHFileOperationW(&op);
+
+    g_dataDir = dst;
+    return (result == 0 && !op.fAnyOperationsAborted);
 }
 
 std::wstring ConfigPath() {
@@ -162,53 +225,6 @@ std::wstring TimeStampForFileName() {
                   st.wSecond);
 }
 
-std::wstring MakeRelativePath(const std::wstring& absPath) {
-    std::wstring exeDir = ExeDir();
-    // Ensure path ends with backslash
-    if (!exeDir.empty() && exeDir.back() != L'\\') {
-        exeDir += L'\\';
-    }
-    
-    // Check if it starts with exe directory
-    if (absPath.length() >= exeDir.length() && 
-        _wcsnicmp(absPath.c_str(), exeDir.c_str(), exeDir.length()) == 0) {
-        // Replace with "."
-        std::wstring result = L".";
-        if (absPath.length() > exeDir.length()) {
-            result += absPath.substr(exeDir.length());
-        }
-        return result;
-    }
-    
-    return absPath;  // Not in exe directory, return original path
-}
-
-std::wstring MakeAbsolutePath(const std::wstring& relPath) {
-    if (relPath.empty() || relPath == L".") {
-        return ExeDir();
-    }
-    
-    // If starts with ".", replace with exe directory
-    if (relPath.length() >= 1 && relPath[0] == L'.') {
-        std::wstring exeDir = ExeDir();
-        if (!exeDir.empty() && exeDir.back() != L'\\') {
-            exeDir += L'\\';
-        }
-        
-        if (relPath.length() == 1) {
-            return exeDir;
-        }
-        
-        // Handle ".\xxx" case
-        if (relPath.length() >= 2 && relPath[1] == L'\\') {
-            return exeDir + relPath.substr(2);
-        }
-        
-        return exeDir + relPath.substr(1);
-    }
-    
-    return relPath;  // Not a relative path, return original path
-}
 
 uint64_t Hash64(const void* data, size_t size) {
     const uint8_t* p = static_cast<const uint8_t*>(data);
@@ -366,16 +382,16 @@ bool GetAutostart() {
 }
 
 void ErrorBox(HWND owner, const std::wstring& text) {
-    MessageBoxW(owner, text.c_str(), AppName(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    MessageBoxW(owner, text.c_str(), AppName(), MB_OK | MB_ICONERROR | MB_TOPMOST);
 }
 
 void InfoBox(HWND owner, const std::wstring& text) {
-    MessageBoxW(owner, text.c_str(), AppName(), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+    MessageBoxW(owner, text.c_str(), AppName(), MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 }
 
 bool ConfirmBox(HWND owner, const std::wstring& text) {
     return MessageBoxW(owner, text.c_str(), AppName(),
-                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES;
+                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST) == IDYES;
 }
 
 }  // namespace util

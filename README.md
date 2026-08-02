@@ -69,7 +69,7 @@ The program lives in the system tray. Click the tray icon to open the quick-past
 | Persistence | Custom binary format; data survives restarts |
 | Async disk writes | Background thread handles I/O; UI thread never blocks |
 | Large data protection | Prompts cleanup when data exceeds threshold (configurable) |
-| Internationalization | English built-in; .lng language files for extensions; Simplified Chinese included |
+| Internationalization | English built-in; Simplified Chinese compiled into exe; other languages via .lng files |
 | Auto-start | Registry Run key; no admin privileges needed |
 | Dark mode | Follows system theme in real time |
 | High DPI | Per-Monitor V2; crisp rendering across multi-monitor setups |
@@ -130,9 +130,11 @@ src/
   tray.h/.cpp        Tray icon
   i18n.h/.cpp        Internationalization
   asyncwriter.h/.cpp Async disk writer
+  log.h/.cpp         Lightweight file logging
+  raii.h             RAII wrappers (GlobalLock, HANDLE, GDI objects)
   util.h/.cpp        Utility functions
 lang/
-  zh-CN.lng          Simplified Chinese language pack
+  zh-CN.lng          Simplified Chinese language pack (compiled into exe at build time)
 ```
 
 ---
@@ -155,7 +157,7 @@ clipwiz/
 │   ├── technical.md      Detailed technical documentation
 │   └── variables_win.md  Windows environment variables reference (reserved)
 ├── lang/
-│   └── zh-CN.lng         Simplified Chinese language pack
+│   └── zh-CN.lng         Simplified Chinese (compiled into exe)
 └── src/                  All source code
 ```
 
@@ -164,7 +166,7 @@ clipwiz/
 
 # ClipWiz
 
-轻量级 Windows 剪贴板管理工具。单文件、零依赖、常驻内存 < 8MB。
+轻量级 Windows 剪贴板历史记录工具。单文件、零依赖、常驻内存 < 8MB。
 
 ---
 
@@ -233,7 +235,7 @@ cmake --build build --config Release
 | 持久化 | 自定义二进制格式落盘，重启后数据完整保留 |
 | 异步写盘 | 后台线程执行 I/O，主线程零阻塞 |
 | 大数据保护 | 数据量超阈值时提示清理，阈值可配置 |
-| 国际化 | 英文内置，.lng 语言文件扩展，自带简体中文 |
+| 国际化 | 英文内置，简体中文编译进 exe，其他语言通过 .lng 文件扩展 |
 | 开机自启 | 写注册表 Run 项，无需管理员权限 |
 | 深色模式 | 跟随系统主题实时切换 |
 | 高 DPI | Per-Monitor V2，多显示器不同缩放清晰渲染 |
@@ -297,9 +299,11 @@ src/
   tray.h/.cpp        托盘图标
   i18n.h/.cpp        国际化
   asyncwriter.h/.cpp 异步写盘
+  log.h/.cpp         轻量文件日志
+  raii.h             RAII 封装（GlobalLock、HANDLE、GDI 对象）
   util.h/.cpp        工具函数
 lang/
-  zh-CN.lng          简体中文语言包
+  zh-CN.lng          简体中文语言包（编译时打包进 exe）
 ```
 
 ---
@@ -322,6 +326,6 @@ clipwiz/
 │   ├── technical.md      详细技术文档
 │   └── variables_win.md  Windows 环境变量参考（预留）
 ├── lang/
-│   └── zh-CN.lng         简体中文语言包
+│   └── zh-CN.lng         简体中文（编译时打包进 exe）
 └── src/                  全部源码
 ```

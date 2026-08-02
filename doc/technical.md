@@ -17,25 +17,23 @@ struct Item {
     bool         pinned;      // pin flag
     uint64_t     createdAt;   // FILETIME
     uint64_t     usedAt;      // last paste timestamp
-    uint32_t     hotkey;      // high 16 bits = MOD_* modifiers, low 16 bits = VK code; 0 = unbound
-    std::wstring text;        // full text content
-    std::wstring preview;     // one-line summary for list display
-    uint32_t     imgW, imgH;  // pixel dimensions (kind==Image)
-    std::vector<uint8_t> data; // raw data (HTML/RTF/FileDrop etc.)
+    std::vector<uint8_t> data; // unified binary content (text=UTF-16LE, image=PNG, etc.)
+    uint32_t     imgW, imgH;  // pixel dimensions (kind==Image only)
+    std::wstring preview;     // one-line summary, recomputed at runtime, not persisted
+    uint64_t     hash;        // FNV-1a hash for dedup, computed at runtime, not persisted
 };
 ```
 
-Items are stored in a `std::vector<Item>`; vector order equals display order (pinned section first, history sorted by most recent use). Image pixel data is not kept in memory — loaded from disk on demand.
+Items are stored in a `std::vector<Item>`; vector order equals display order (pinned section first in manual order, unpinned sorted by usedAt descending). All content (text/image/HTML/RTF/file list) is stored uniformly as a binary blob in the `data` field. Hotkeys are not tied to items; they are managed positionally via config (the Nth pinned position gets the Nth hotkey).
 
 ### Disk Layout
 
 ```
 Data directory (defaults to exe directory; configurable in settings)
-    config.ini          Global settings (UTF-8 text)
-    store.dat           Item database (custom binary format)
+    config.ini          Global settings (UTF-8 flat key=value text)
+    store.dat           Item database (custom binary format, all content inline)
     store.dat.tmp       Temporary file during write; atomically replaced on completion
-    images\
-        000000000123.png  Image items, filename = item id
+    clipwiz.log         Runtime log file (append mode)
 ```
 
 ### store.dat Binary Format
@@ -56,12 +54,9 @@ Record × itemCount
     uint32   flags        bit0 = pinned
     uint64   createdAt
     uint64   usedAt
-    uint32   hotkey
     uint32   imgW
     uint32   imgH
-    uint32   textLen      UTF-16 code unit count
-    wchar_t  text[textLen]
-    uint32   dataLen      raw data byte count
+    uint32   dataLen      byte count of unified content blob
     uint8    data[dataLen]
 ```
 
@@ -69,31 +64,26 @@ Binary format chosen over JSON/INI because clipboard text inevitably contains ne
 
 ### config.ini
 
+Flat key=value format, no sections. UTF-8 encoded.
+
 ```ini
-[General]
 MaxHistory=50            ; unpinned item limit, range 5–2000
-Autostart=0              ; launch at system startup
-ExpiryDays=0             ; expiry in days, 0 = never
-Language=                ; locale code, empty = follow system
-Theme=auto               ; auto / light / dark
-PopupPosition=mouse      ; mouse / caret / last
-FontName=                ; custom font name, empty = system default
-FontHeight=0             ; custom font size, 0 = system default
-DataDir=                 ; data directory, empty = exe directory
-
-[Paste]
-PopupHotkey=Ctrl+Alt+V   ; hotkey to open popup
+ExpiryDays=5             ; expiry in days, 0 = never
 PasteDelayMs=60          ; delay after focus restore before sending Ctrl+V
-CloseAfterPaste=1        ; close popup after paste
-
-[Limits]
+RowsVisible=10           ; visible rows in popup
+PopupPosition=0          ; 0=mouse / 1=caret / 2=last position
+Theme=0                  ; 0=auto / 1=light / 2=dark
 MaxTextBytes=1048576     ; text larger than this is not captured (1MB)
 MaxImagePixels=33177600  ; images larger than ~8K×4K are not captured
-ImageDiskBudgetMB=200    ; soft limit for images directory
 LargeItemThresholdMB=10  ; threshold for large-item cleanup (1–500)
-
-[UI]
-RowsVisible=10           ; visible rows in popup
+LastPopupX=-1            ; last popup window position
+LastPopupY=-1
+PopupHotkey=196631       ; encoded: high16=MOD_* flags, low16=VK code
+PinnedHotkey0=0          ; hotkey for pinned position 0 (0=unbound)
+Language=zh-CN           ; locale code, empty = follow system
+DataDir=                 ; data directory (relative or absolute), empty = exe directory
+FontName=                ; custom font name, empty = system default
+FontSize=0               ; custom font point size, 0 = system default
 ```
 
 ---
@@ -106,10 +96,9 @@ Data durability is a core reliability guarantee:
 2. **History limit counts only unpinned items.** Pinned items don't consume quota.
 3. **Critical operations flush immediately:** pin, unpin, hotkey bind, delete.
 4. **Normal changes use deferred writes:** SetTimer 800ms coalesces consecutive copies into one write.
-5. **Exit forces a flush:** both tray-exit and WM_ENDSESSION trigger a save.
+5. **Exit forces a flush:** both tray-exit and WM_ENDSESSION trigger a save. On exit, if an async write is in progress, the main thread waits up to 5 seconds for completion.
 6. **Atomic writes:** write tmp → FlushFileBuffers → MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH). Power failure at worst reverts to the previous complete version.
 7. **Corruption protection:** if store.dat fails validation at startup, it is renamed to `store.corrupt.<timestamp>.dat` (never overwritten or deleted). The program starts with an empty database and notifies the user.
-8. **Deferred image deletion:** image files are only removed after the corresponding item is confirmed deleted from the database.
 
 ---
 
@@ -121,7 +110,7 @@ Disk I/O runs on a dedicated background thread to avoid blocking the UI.
 - Internals: CRITICAL_SECTION protects shared state; auto-reset Event wakes the worker thread
 - Concurrency control: a new submission replaces any queued (not-yet-started) data — no accumulation; at most one write operation executes at any time
 - `std::atomic<bool> busy` flag allows the UI thread to query write status
-- `Stop()` waits for the in-flight write to complete before the thread exits
+- On exit, the main thread saves data synchronously first, then calls `Stop()` which signals the thread to terminate (does not block waiting)
 
 ---
 
@@ -145,16 +134,16 @@ Uses `AddClipboardFormatListener(hwnd)` to receive `WM_CLIPBOARDUPDATE`. This is
 WM_CLIPBOARDUPDATE
   ├─ Sequence check: GetClipboardSequenceNumber() == our last write → discard
   │  (prevents self-paste from creating duplicates)
-  ├─ OpenClipboard retry: 50ms intervals, max 5 attempts; give up on total failure
+  ├─ OpenClipboard: single attempt; give up on failure
   ├─ Exclusion check: "Clipboard Viewer Ignore" or
   │  "ExcludeClipboardContentFromMonitorProcessing" present → discard
   │  (respects password manager privacy flags)
   ├─ Content extraction (by priority):
-  │    CF_UNICODETEXT → text item (discarded if > MaxTextBytes)
-  │    CF_DIBV5 / CF_DIB / CF_BITMAP → image item
+  │    Rich Text Format → RTF item (discarded if > MaxTextBytes)
+  │    HTML Format → HTML item (discarded if > MaxTextBytes)
+  │    CF_DIBV5 / CF_DIB / CF_BITMAP → image item (discarded if > MaxImagePixels)
   │    CF_HDROP → file-drop item (stores path list only)
-  │    HTML Format → HTML item
-  │    Rich Text Format → RTF item
+  │    CF_UNICODETEXT → text item (discarded if > MaxTextBytes)
   │    otherwise → discard
   ├─ Deduplication: identical content already exists → move existing item to front
   └─ Insert → eviction check (unpinned only) → deferred save
@@ -163,9 +152,9 @@ WM_CLIPBOARDUPDATE
 ### Image Handling
 
 - **Capture:** prefers CF_DIBV5 (includes alpha channel info), falls back to CF_DIB, then CF_BITMAP
-- **Storage:** WIC-encodes to PNG on disk. A 1920×1080 screenshot is ~8MB as DIB, typically a few hundred KB as PNG
-- **Paste back:** decodes PNG to 32-bit DIB; sets both CF_DIBV5 and CF_DIB on the clipboard for legacy compatibility
-- **Thumbnails:** generated on demand when popup opens; height matches row height; max 24 cached; released on close
+- **Storage:** WIC-encodes to PNG bytes stored inline in store.dat's data blob. A 1920×1080 screenshot is ~8MB as DIB, typically a few hundred KB as PNG
+- **Paste back:** decodes PNG to 32-bit DIB; sets CF_DIBV5, CF_DIB, and PNG format on the clipboard for maximum compatibility
+- **Thumbnails:** generated on demand when popup is visible; max 32 cached; released on DPI change or window destroy
 
 ---
 
@@ -189,14 +178,13 @@ The most recent window passing the filter is recorded as the paste target. For d
 2. Hide popup
 3. `SetForegroundWindow(target)` to restore focus; on failure, AttachThreadInput + SetForegroundWindow + BringWindowToTop as fallback
 4. `Sleep(PasteDelayMs)` to let the target window acquire focus
-5. Modifier key correction: use GetAsyncKeyState to detect physical state of Shift/Alt/Win/main key; send keyup for keys that shouldn't be held
-6. SendInput: Ctrl↓ V↓ V↑ Ctrl↑
-7. Restore modifier keys to their physical state
-8. Update item usedAt; move item to front of list (pinned items stay in pinned section)
+5. Modifier key release: use GetAsyncKeyState to detect physical state of Ctrl/Alt/Shift/Win (left+right variants); send keyup for any that are currently held
+6. SendInput: Ctrl↓ V↓ V↑ Ctrl↑ (scan codes filled via MapVirtualKeyW)
+7. Update item usedAt; move item to front of list (pinned items stay in pinned section)
 
-### Why Modifier Correction Matters
+### Why Modifier Release Matters
 
-When pasting via Ctrl+1, the user's fingers are still holding Ctrl and 1. Sending Ctrl+V directly would produce a garbled key combination at the target. The solution: detect and release extraneous physical keys before sending, then restore afterward. Synthetic events carry `KEYEVENTF_EXTENDEDKEY` to distinguish left/right keys, and `INPUT.dwExtraInfo` carries a signature value to identify our own events.
+When pasting via Ctrl+1, the user's fingers are still holding Ctrl and 1. Sending Ctrl+V directly would produce a garbled key combination at the target (e.g. Ctrl+Alt+V). The solution: detect all physically-held modifier keys and send synthetic keyup events before issuing Ctrl+V. Released modifiers are not re-pressed afterward — the user has already lifted them by the time paste completes.
 
 ### No Clipboard Restoration
 
@@ -238,7 +226,7 @@ All UI uses native Win32 controls + GDI custom drawing. No UI framework. Font is
 
 - Left click: open quick-paste popup
 - Right click: context menu (Quick Paste / Settings / Auto-start / Clear History / About / Exit)
-- Tooltip: `ClipWiz — N items, M pinned`
+- Tooltip: `ClipWiz` (static; updated via `tray::SetTip` if needed)
 
 ### Quick-Paste Popup
 
@@ -262,7 +250,7 @@ Implementation details:
 
 - Global sequential numbering: pinned starts at 1, history continues without gaps
 - Pin icon and number column have unified width for visual alignment
-- Size: 420dip wide, height from RowsVisible setting
+- Size: 520dip wide, height from RowsVisible setting
 - Position: mouse pointer / text caret / last opened position (draggable)
 - Keyboard: ↑↓ navigate, Enter paste, Esc close, Alt+1–9 direct paste, Ctrl+D delete, Ctrl+P toggle pin
 - Mouse: click select, double-click paste, right-click context menu
@@ -274,25 +262,21 @@ Implementation details:
 
 ### Settings Dialog
 
-Multi-tab dialog:
+Single centered window with grouped sections (no Property Sheet / multi-tab). Built at runtime via in-memory DLGTEMPLATE + `DialogBoxIndirectParamW`; all controls created dynamically in `WM_INITDIALOG`. No dialog resources in .rc file.
 
-**[General]**
+**[General section]**
 - Launch at startup (checkbox)
 - Max history items (numeric input)
 - Item expiry in days (numeric input)
-- Language (dropdown; defaults to system locale; falls back to English)
+- Language (dropdown: Follow system / English / 简体中文)
 - Theme (follow system / light / dark)
 - Popup position (mouse pointer / text caret / last position)
-- Display font (button showing font name + size, with "Reset" button)
-- Data directory (read-only path + browse button)
+- Display font (button showing font name + size, with "Reset" button; uses ChooseFontW)
+- Data directory (read-only path + browse button; uses SHBrowseForFolderW)
 
-**[Supported Types]**
-- Left panel: list of formats (text, image, HTML, RTF, file drop)
-- Right panel: description and typical source applications
-
-**[Hotkeys]**
-- Popup hotkey (hotkey control)
-- Pinned position hotkeys (10 positions, 2×5 grid, each with hotkey control + "Include Win" checkbox)
+**[Shortcuts section]**
+- Popup hotkey (hotkey control + "Win" checkbox)
+- Pinned position hotkeys (10 positions, 2×5 grid, each with hotkey control + "Win" checkbox)
 
 ### Dark Mode
 
@@ -307,11 +291,26 @@ Manifest declares Per-Monitor V2. All dimension constants stored in dip; convert
 ## Internationalization (i18n)
 
 - English is built into the code (kDefaults table in `i18n.cpp`) as the ultimate fallback
+- Simplified Chinese is compiled into the exe as an RCDATA resource (`lang/zh-CN.lng` → `IDR_LNG_ZHCN`)
 - Language file format: `lang/<locale>.lng`, UTF-8 encoded, `key=value` plain text
-- Load priority: Language setting in config.ini → system UI language → English
+- Load priority: external disk file `lang/<locale>.lng` → built-in resource (zh-CN only) → English
+- External file always takes priority over built-in resource, allowing users to override translations without recompiling
+- Other languages (Japanese, Korean, etc.) are loaded exclusively from disk; users distribute .lng files independently
 - All user-visible strings go through `i18n::T(key)`; no hardcoded UI text in code
-- Ships with Simplified Chinese pack `lang/zh-CN.lng`
 - Supports `%s`, `%d`, `%u` placeholders via `util::Format`
+
+---
+
+## Logging
+
+Lightweight file logger (`log.h` / `log.cpp`):
+
+- Output file: `<dataDir>\clipwiz.log`, append mode, each entry flushed immediately (`fflush`)
+- Format: `[YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message`
+- Levels: DEBUG / INFO / WARN / ERROR; minimum level configurable at init
+- Thread safety: CRITICAL_SECTION guards concurrent writes
+- No rotation or size limit — log is expected to remain small under normal operation
+- Primary use: startup diagnostics, hotkey registration failures, save errors
 
 ---
 
@@ -342,7 +341,7 @@ Manifest declares Per-Monitor V2. All dimension constants stored in dip; convert
 
 ### Linked Libraries
 
-user32, gdi32, msimg32, shell32, comctl32, advapi32, ole32, windowscodecs
+user32, gdi32, msimg32, shell32, comctl32, advapi32, ole32, windowscodecs, comdlg32
 
 All ship with the Windows SDK. Zero third-party dependencies.
 
@@ -352,6 +351,31 @@ All ship with the Windows SDK. Zero third-party dependencies.
 - Idle resident memory: 4–8 MB
 - Cold start: < 100ms
 - Popup display: < 30ms
+
+### Source Layout
+
+```
+src/
+  main.cpp           Entry, single-instance check, message loop
+  app.h/.cpp         Global state, message dispatch
+  store.h/.cpp       Item database, serialization, eviction
+  clipboard.h/.cpp   Clipboard monitoring and read/write
+  hotkey.h/.cpp      Global hotkey management
+  paste.h/.cpp       Paste execution
+  popup.h/.cpp       Quick-paste popup window
+  settings.h/.cpp    Configuration and settings dialog
+  imagecodec.h/.cpp  WIC image codec
+  tray.h/.cpp        Tray icon
+  i18n.h/.cpp        Internationalization
+  asyncwriter.h/.cpp Async disk writer
+  log.h/.cpp         Lightweight file logging
+  raii.h             RAII wrappers (GlobalLock, HANDLE, GDI objects)
+  util.h/.cpp        Utility functions
+  resource.h         Control IDs and resource constants
+  clipwiz.rc         Icon, manifest, version info (no dialog templates)
+lang/
+  zh-CN.lng          Simplified Chinese language pack
+```
 
 ---
 
@@ -374,7 +398,7 @@ All ship with the Windows SDK. Zero third-party dependencies.
 | Target window runs as administrator | ClipWiz must also run elevated |
 | SetForegroundWindow denied by system | AttachThreadInput fallback |
 | Hotkey conflicts with system/common apps | Settings UI warns explicitly; user can rebind |
-| Image items consume disk | PNG compression + soft disk budget + only evict unpinned images |
+| Image items consume disk | PNG compression + large-data protection prompt + only evict unpinned items |
 | Antivirus sensitivity to clipboard monitoring + key simulation | No network, no injection, no hook DLLs — official APIs only |
 | Input method state | Only sends Ctrl+V combo, never character-by-character input |
 
@@ -400,25 +424,23 @@ struct Item {
     bool         pinned;      // 置顶标记
     uint64_t     createdAt;   // FILETIME
     uint64_t     usedAt;      // 最后一次被粘贴的时间
-    uint32_t     hotkey;      // 高 16 位修饰键 MOD_*，低 16 位虚拟键码；0 = 未绑定
-    std::wstring text;        // 完整文本内容
-    std::wstring preview;     // 列表里显示的一行摘要
+    std::vector<uint8_t> data; // 统一二进制内容（text=UTF-16LE, image=PNG 等）
     uint32_t     imgW, imgH;  // kind==Image：像素尺寸
-    std::vector<uint8_t> data; // 原始数据（HTML/RTF/FileDrop 等）
+    std::wstring preview;     // 列表里显示的一行摘要，运行时计算，不持久化
+    uint64_t     hash;        // FNV-1a 去重哈希，运行时计算，不持久化
 };
 ```
 
-内存中用 `std::vector<Item>` 存储，顺序即显示顺序：置顶区在前，历史区按最近使用时间排列。图片像素数据不常驻内存，按需从磁盘读取。
+内存中用 `std::vector<Item>` 存储，顺序即显示顺序：置顶区在前（手动排序），历史区按 usedAt 降序排列。所有内容（文本/图片/HTML/RTF/文件列表）统一以二进制 blob 存于 `data` 字段。快捷键不绑定条目，按位置管理（第 N 个置顶位对应第 N 个快捷键）。
 
 ### 磁盘布局
 
 ```
 数据目录（默认为 exe 同目录，可在设置中自定义）
-    config.ini          全局设置（UTF-8 文本）
-    store.dat           条目库（自定义二进制格式）
+    config.ini          全局设置（UTF-8 平铺 key=value 文本）
+    store.dat           条目库（自定义二进制格式，所有内容内联）
     store.dat.tmp       写入时的临时文件，完成后原子替换
-    images\
-        000000000123.png  图片条目，文件名为条目 id
+    clipwiz.log         运行日志（追加模式）
 ```
 
 ### store.dat 二进制格式
@@ -439,12 +461,9 @@ Record × itemCount
     uint32   flags        bit0 = pinned
     uint64   createdAt
     uint64   usedAt
-    uint32   hotkey
     uint32   imgW
     uint32   imgH
-    uint32   textLen      UTF-16 码元个数
-    wchar_t  text[textLen]
-    uint32   dataLen      原始数据字节数
+    uint32   dataLen      统一内容 blob 字节数
     uint8    data[dataLen]
 ```
 
@@ -452,31 +471,26 @@ Record × itemCount
 
 ### config.ini
 
+平铺 key=value 格式，无分节。UTF-8 编码。
+
 ```ini
-[General]
 MaxHistory=50            ; 未置顶条目上限，范围 5~2000
-Autostart=0              ; 开机自启
-ExpiryDays=0             ; 过期天数，0=不过期
-Language=                ; 语言代码，空=跟随系统
-Theme=auto               ; auto / light / dark
-PopupPosition=mouse      ; mouse / caret / last
-FontName=                ; 自定义字体名，空=系统默认
-FontHeight=0             ; 自定义字号，0=系统默认
-DataDir=                 ; 数据目录，空=exe 同目录
-
-[Paste]
-PopupHotkey=Ctrl+Alt+V   ; 唤出快速粘贴框
+ExpiryDays=5             ; 过期天数，0=不过期
 PasteDelayMs=60          ; 焦点切回后到发 Ctrl+V 的等待
-CloseAfterPaste=1        ; 粘贴后关闭弹出框
-
-[Limits]
+RowsVisible=10           ; 弹出框一屏显示行数
+PopupPosition=0          ; 0=鼠标 / 1=光标 / 2=上次位置
+Theme=0                  ; 0=auto / 1=light / 2=dark
 MaxTextBytes=1048576     ; 超过此大小的文本不入池（1MB）
 MaxImagePixels=33177600  ; 超过约 8K×4K 的图片不入池
-ImageDiskBudgetMB=200    ; images 目录软上限
 LargeItemThresholdMB=10  ; 清理大条目时的阈值（1~500）
-
-[UI]
-RowsVisible=10           ; 弹出框一屏显示行数
+LastPopupX=-1            ; 上次弹出窗口位置
+LastPopupY=-1
+PopupHotkey=196631       ; 编码：高16位=MOD_* 修饰键，低16位=VK 码
+PinnedHotkey0=0          ; 置顶位 0 的快捷键（0=未绑定）
+Language=zh-CN           ; 语言代码，空=跟随系统
+DataDir=                 ; 数据目录（相对或绝对），空=exe 同目录
+FontName=                ; 自定义字体名，空=系统默认
+FontSize=0               ; 自定义字号，0=系统默认
 ```
 
 ---
@@ -489,10 +503,9 @@ RowsVisible=10           ; 弹出框一屏显示行数
 2. **条数上限只统计未置顶条目。** 置顶项不占额度。
 3. **关键操作立即落盘：** 置顶、取消置顶、绑定快捷键、删除。
 4. **普通变化延迟合并：** SetTimer 800ms，连续复制时合并为一次写入。
-5. **退出时强制落盘：** 托盘退出和 WM_ENDSESSION 均触发。
+5. **退出时强制落盘：** 托盘退出和 WM_ENDSESSION 均触发。退出时若有异步写入正在进行，主线程最多等待 5 秒。
 6. **原子写入：** 写 tmp → FlushFileBuffers → MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)。中途断电最坏回退到上一个完整版本。
 7. **损坏保护：** 启动时 store.dat 校验失败不覆盖不清空，改名为 `store.corrupt.<时间戳>.dat` 保留，以空库启动并提示用户。
-8. **图片文件延迟删除：** 仅在条目确认从库中移除后才删除对应的 images 目录文件。
 
 ---
 
@@ -504,7 +517,7 @@ RowsVisible=10           ; 弹出框一屏显示行数
 - AsyncWriter 内部：CRITICAL_SECTION 保护共享状态 + auto-reset Event 唤醒线程
 - 并发控制：新请求替换排队中的旧数据（不堆积），同一时刻最多一个写操作在执行
 - `std::atomic<bool> busy` 标志供主线程查询写盘状态
-- 退出时 `Stop()` 等待当前写操作完成后线程退出
+- 退出时主线程先同步保存数据，然后调用 `Stop()` 通知线程退出（不阻塞等待）
 
 ---
 
@@ -528,16 +541,16 @@ RowsVisible=10           ; 弹出框一屏显示行数
 WM_CLIPBOARDUPDATE
   ├─ 序列号检查：GetClipboardSequenceNumber() == 自己上次写入值 → 丢弃
   │  （防止自己粘贴时写的内容被当成新条目）
-  ├─ OpenClipboard 重试：失败则 50ms 后重试，最多 5 次；全失败放弃
+  ├─ OpenClipboard：单次尝试，失败即放弃
   ├─ 排除标记检查：存在 "Clipboard Viewer Ignore" 或
   │  "ExcludeClipboardContentFromMonitorProcessing" 格式 → 丢弃
   │  （尊重密码管理器的隐私标记）
   ├─ 取内容（按优先级）：
-  │    CF_UNICODETEXT → 文本条目（超 MaxTextBytes 丢弃）
-  │    CF_DIBV5 / CF_DIB / CF_BITMAP → 图片条目
+  │    Rich Text Format → RTF 条目（超 MaxTextBytes 丢弃）
+  │    HTML Format → HTML 条目（超 MaxTextBytes 丢弃）
+  │    CF_DIBV5 / CF_DIB / CF_BITMAP → 图片条目（超 MaxImagePixels 丢弃）
   │    CF_HDROP → 文件拖放条目（只存路径列表）
-  │    HTML Format → HTML 条目
-  │    Rich Text Format → RTF 条目
+  │    CF_UNICODETEXT → 文本条目（超 MaxTextBytes 丢弃）
   │    否则 → 丢弃
   ├─ 去重：内容与已有条目完全相同 → 不新增，将旧条目提到最前
   └─ 入池 → 淘汰检查（只动未置顶）→ 延迟保存
@@ -546,9 +559,9 @@ WM_CLIPBOARDUPDATE
 ### 图片处理
 
 - **读取：** 优先 CF_DIBV5（含 alpha 通道信息），退化到 CF_DIB，再退化到 CF_BITMAP
-- **存储：** WIC 编码为 PNG 落盘。1920×1080 截图 DIB 约 8MB，PNG 通常几百 KB
-- **写回剪贴板：** PNG 解码为 32 位 DIB，同时设置 CF_DIBV5 和 CF_DIB 两种格式，兼容旧程序
-- **缩略图：** 弹出框打开时按需生成，高度等于行高，最多缓存 24 张，关框后释放
+- **存储：** WIC 编码为 PNG 字节，内联存于 store.dat 的 data blob。1920×1080 截图 DIB 约 8MB，PNG 通常几百 KB
+- **写回剪贴板：** PNG 解码为 32 位 DIB，同时设置 CF_DIBV5、CF_DIB 和 PNG 三种格式，最大兼容性
+- **缩略图：** 弹出框打开时按需生成，最多缓存 32 张，DPI 变化或窗口销毁时释放
 
 ---
 
@@ -572,14 +585,13 @@ WM_CLIPBOARDUPDATE
 2. 隐藏弹出框
 3. `SetForegroundWindow(target)` 归还焦点；失败则 AttachThreadInput + SetForegroundWindow + BringWindowToTop 兜底
 4. `Sleep(PasteDelayMs)` 等待目标窗口获得焦点
-5. 修正修饰键状态：用 GetAsyncKeyState 检测 Shift/Alt/Win/主键物理状态，补发 keyup 抬起不该按下的键
-6. SendInput 发送 Ctrl↓ V↓ V↑ Ctrl↑
-7. 按物理状态还原修饰键
-8. 更新条目 usedAt，将条目提到列表最前（置顶项留在置顶区）
+5. 释放修饰键：用 GetAsyncKeyState 检测 Ctrl/Alt/Shift/Win（左右分别检测）物理状态，对仍按下的键补发 keyup
+6. SendInput 发送 Ctrl↓ V↓ V↑ Ctrl↑（扫描码通过 MapVirtualKeyW 填充）
+7. 更新条目 usedAt，将条目提到列表最前（置顶项留在置顶区）
 
-### 修饰键修正的必要性
+### 修饰键释放的必要性
 
-用 Ctrl+1 触发粘贴时，用户手指仍按着 Ctrl 和 1。直接发 Ctrl+V 会导致目标程序收到异常组合键。因此发送前必须检测并抬起多余的物理按键，发送后还原。合成事件标记 `KEYEVENTF_EXTENDEDKEY` 区分左右键，`INPUT.dwExtraInfo` 带签名值标识自身发送的事件。
+用 Ctrl+1 触发粘贴时，用户手指仍按着 Ctrl 和 1。直接发 Ctrl+V 会导致目标程序收到异常组合键（如 Ctrl+Alt+V）。因此发送前必须检测所有物理按下的修饰键并补发 keyup。释放后不再还原——粘贴完成时用户手指通常已抬起。
 
 ### 不还原原剪贴板内容
 
@@ -621,7 +633,7 @@ WM_CLIPBOARDUPDATE
 
 - 左键单击：打开快速粘贴框
 - 右键：菜单（快速粘贴 / 设置 / 开机自启 / 清空历史 / 关于 / 退出）
-- 悬浮提示：`ClipWiz — N 条记录，M 个置顶`
+- 悬浮提示：`ClipWiz`（静态文本，可通过 `tray::SetTip` 更新）
 
 ### 快速粘贴框
 
@@ -645,7 +657,7 @@ WM_CLIPBOARDUPDATE
 
 - 编号全局连续：置顶从 1 开始，非置顶顺延，不重复
 - 置顶项图钉图标与编号区域统一宽度，视觉对齐
-- 尺寸：宽 420dip，高按 RowsVisible 配置计算
+- 尺寸：宽 520dip，高按 RowsVisible 配置计算
 - 弹出位置：鼠标指针处 / 光标处 / 上次打开的位置（可拖动）
 - 键盘操作：↑↓ 移动、Enter 粘贴、Esc 关闭、Alt+1~9 直接粘贴、Ctrl+D 删除、Ctrl+P 切换置顶
 - 鼠标操作：单击选中、双击粘贴、右键上下文菜单
@@ -657,24 +669,20 @@ WM_CLIPBOARDUPDATE
 
 ### 设置对话框
 
-多 Tab 页：
+单窗口分组式布局（非 Property Sheet / 多 Tab）。运行时通过内存 DLGTEMPLATE + `DialogBoxIndirectParamW` 创建，所有控件在 `WM_INITDIALOG` 中动态生成。.rc 文件中不含任何对话框资源。
 
-**[常规]**
+**[常规分组]**
 - 开机自动启动（checkbox）
 - 保存复制项目的最大数量（数字框）
 - 粘贴条目的过期天数（数字框）
-- 语言（下拉框，默认系统语言，不匹配回退英文）
+- 语言（下拉框：跟随系统 / English / 简体中文）
 - 主题（跟随系统 / 浅色 / 深色）
 - 窗口弹出位置（鼠标指针处 / 光标处 / 上次打开的位置）
-- 显示字体（按钮显示字体名+字号，附"恢复默认"按钮）
-- 数据库路径（只读路径框 + 浏览按钮）
+- 显示字体（按钮显示字体名+字号，附"重置"按钮；调用 ChooseFontW）
+- 数据库路径（只读路径框 + 浏览按钮；调用 SHBrowseForFolderW）
 
-**[支持类型]**
-- 左栏列表：纯文本、图片、HTML、RTF、文件拖放
-- 右栏：格式说明、产生该格式的典型软件
-
-**[快捷键]**
-- 唤出快速粘贴框（hotkey 控件）
+**[快捷键分组]**
+- 唤出快速粘贴框（hotkey 控件 + "含Win" checkbox）
 - 置顶项快捷键（10 个位置，2×5 网格，每个含 hotkey 控件 + "含Win" checkbox）
 
 ### 深色模式
@@ -690,11 +698,26 @@ manifest 声明 Per-Monitor V2。所有尺寸常量以 dip 存储，绘制时用
 ## 国际化（i18n）
 
 - 英文内置于代码（`i18n.cpp` 中的 kDefaults 表），作为终极回退
+- 简体中文在编译时以 RCDATA 资源打包进 exe（`lang/zh-CN.lng` → `IDR_LNG_ZHCN`）
 - 语言文件格式：`lang/<locale>.lng`，UTF-8 编码，`key=value` 纯文本
-- 加载优先级：config.ini 中 Language 设置 → 系统 UI 语言 → 英文
+- 加载优先级：磁盘文件 `lang/<locale>.lng` → 内置资源（仅 zh-CN）→ 英文
+- 外部文件始终优先于内置资源，用户可自行覆盖翻译而无需重新编译
+- 其他语言（日文、韩文等）仅从磁盘加载，由用户自行传播 .lng 文件
 - 所有用户可见文字通过 `i18n::T(key)` 获取，代码中不存在硬编码界面文字
-- 自带简体中文语言包 `lang/zh-CN.lng`
 - 支持 `%s`、`%d`、`%u` 占位符，通过 `util::Format` 填充
+
+---
+
+## 日志
+
+轻量文件日志（`log.h` / `log.cpp`）：
+
+- 输出文件：`<数据目录>\clipwiz.log`，追加模式，每条日志立即刷新（`fflush`）
+- 格式：`[YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message`
+- 级别：DEBUG / INFO / WARN / ERROR，初始化时可设最低级别
+- 线程安全：CRITICAL_SECTION 保护并发写入
+- 无日志轮转和大小限制——正常运行下日志量很小
+- 主要用途：启动诊断、热键注册失败、保存错误
 
 ---
 
@@ -725,7 +748,7 @@ manifest 声明 Per-Monitor V2。所有尺寸常量以 dip 存储，绘制时用
 
 ### 链接库
 
-user32、gdi32、msimg32、shell32、comctl32、advapi32、ole32、windowscodecs
+user32、gdi32、msimg32、shell32、comctl32、advapi32、ole32、windowscodecs、comdlg32
 
 均为 Windows SDK 自带，无第三方依赖。
 
@@ -735,6 +758,31 @@ user32、gdi32、msimg32、shell32、comctl32、advapi32、ole32、windowscodecs
 - 空闲常驻内存：4~8 MB
 - 冷启动：< 100ms
 - 弹出框显示：< 30ms
+
+### 源文件布局
+
+```
+src/
+  main.cpp           入口、单实例、消息循环
+  app.h/.cpp         全局状态、消息分发
+  store.h/.cpp       条目库、序列化、淘汰
+  clipboard.h/.cpp   剪贴板监听与读写
+  hotkey.h/.cpp      全局热键管理
+  paste.h/.cpp       粘贴执行
+  popup.h/.cpp       快速粘贴框
+  settings.h/.cpp    配置与设置对话框
+  imagecodec.h/.cpp  WIC 图片编解码
+  tray.h/.cpp        托盘图标
+  i18n.h/.cpp        国际化
+  asyncwriter.h/.cpp 异步写盘
+  log.h/.cpp         轻量文件日志
+  raii.h             RAII 封装（GlobalLock、HANDLE、GDI 对象）
+  util.h/.cpp        工具函数
+  resource.h         控件 ID 与资源常量
+  clipwiz.rc         图标、manifest、版本信息（无对话框模板）
+lang/
+  zh-CN.lng          简体中文语言包
+```
 
 ---
 
@@ -757,6 +805,6 @@ user32、gdi32、msimg32、shell32、comctl32、advapi32、ole32、windowscodecs
 | 目标窗口为管理员权限程序 | 需以管理员身份运行 ClipWiz |
 | SetForegroundWindow 被系统拒绝 | AttachThreadInput 兜底 |
 | 快捷键与系统/常用软件冲突 | 设置界面明确提示，用户可自行更换 |
-| 图片条目占磁盘 | PNG 压缩 + 磁盘预算软上限 + 只淘汰未置顶图片 |
+| 图片条目占磁盘 | PNG 压缩 + 大数据保护提示 + 只淘汰未置顶条目 |
 | 杀毒软件对剪贴板监听+模拟按键敏感 | 不联网、不注入、不装钩子 DLL，仅用官方 API |
 | 输入法状态 | 只发 Ctrl+V 组合键，不逐字符输入，不受输入法影响 |

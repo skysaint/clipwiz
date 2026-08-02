@@ -2,6 +2,7 @@
 #include "popup.h"
 
 #include <commctrl.h>
+#include <richedit.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -66,6 +67,8 @@ struct State {
 
     // Ctrl+hover preview
     HWND previewWnd = nullptr;
+    HWND previewEdit = nullptr;   // RichEdit child for RTF preview
+    HMODULE richeditDll = nullptr;
     int previewRow = -1;
     UINT_PTR previewTimer = 0;
 };
@@ -277,6 +280,17 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
         }
     }
 
+    // Rich text indicator badge for RTF/HTML items
+    if (item->kind == ItemKind::Rtf || item->kind == ItemKind::Html) {
+        SelectObject(dc, g.fontSmall);
+        SetTextColor(dc, selected ? theme.selFg : theme.accent);
+        RECT badgeRc = textRc;
+        badgeRc.right = badgeRc.left + g.indexW;
+        DrawTextW(dc, L"RTF", -1, &badgeRc,
+                  DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
+        textRc.left = badgeRc.right + 2;
+    }
+
     SelectObject(dc, g.font);
     SetTextColor(dc, selected ? theme.selFg : theme.fg);
     DrawTextW(dc, item->preview.c_str(), -1, &textRc,
@@ -383,7 +397,34 @@ void PaintAll(HDC target, const RECT& client) {
 
 // ---------------- Preview tooltip window ----------------
 
+// Stream callback for feeding RTF data into RichEdit
+struct RtfStreamData {
+    const uint8_t* data;
+    size_t size;
+    size_t pos;
+};
+
+static DWORD CALLBACK RtfStreamCallback(DWORD_PTR cookie, LPBYTE buffer, LONG cb, LONG* pcb) {
+    auto* sd = reinterpret_cast<RtfStreamData*>(cookie);
+    size_t remaining = sd->size - sd->pos;
+    LONG toCopy = (static_cast<size_t>(cb) < remaining) ? cb : static_cast<LONG>(remaining);
+    if (toCopy > 0) {
+        memcpy(buffer, sd->data + sd->pos, static_cast<size_t>(toCopy));
+        sd->pos += static_cast<size_t>(toCopy);
+    }
+    *pcb = toCopy;
+    return 0;
+}
+
+void DestroyPreviewEdit() {
+    if (g.previewEdit) {
+        DestroyWindow(g.previewEdit);
+        g.previewEdit = nullptr;
+    }
+}
+
 void HidePreview() {
+    DestroyPreviewEdit();
     if (g.previewWnd) {
         DestroyWindow(g.previewWnd);
         g.previewWnd = nullptr;
@@ -407,12 +448,32 @@ void ShowPreview(int rowIndex) {
     int pw = util::Scale(400, g.dpi);
     int ph = util::Scale(260, g.dpi);
 
-    // Position to the right of the row
-    RECT list = ListRect();
+    // Position to the right of the row, clamped to work area
     RECT winRc;
     GetWindowRect(g.hwnd, &winRc);
     int px = winRc.right + 4;
     int py = winRc.top + ListTop() + (rowIndex - g.top) * g.rowH;
+
+    // Get the monitor work area to clamp position
+    HMONITOR mon = MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(mon, &mi);
+    RECT wa = mi.rcWork;
+
+    // If not enough space on the right, show on the left
+    if (px + pw > wa.right) {
+        px = winRc.left - pw - 4;
+    }
+    // Clamp to work area
+    if (px < wa.left) {
+        px = wa.left;
+    }
+    if (py + ph > wa.bottom) {
+        py = wa.bottom - ph;
+    }
+    if (py < wa.top) {
+        py = wa.top;
+    }
 
     if (!g.previewWnd) {
         g.previewWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"ClipWizPreview", L"",
@@ -423,7 +484,46 @@ void ShowPreview(int rowIndex) {
     }
     ShowWindow(g.previewWnd, SW_SHOWNA);
 
-    // Draw content
+    // RTF: render natively via RichEdit control (shows text + images + formatting)
+    if (item->kind == ItemKind::Rtf) {
+        if (!g.richeditDll) {
+            g.richeditDll = LoadLibraryW(L"Msftedit.dll");
+            if (!g.richeditDll) {
+                g.richeditDll = LoadLibraryW(L"riched20.dll");
+            }
+        }
+        DestroyPreviewEdit();
+        if (g.richeditDll) {
+            const wchar_t* cls = (GetModuleHandleW(L"Msftedit.dll") != nullptr)
+                                     ? L"RichEdit50W"
+                                     : RICHEDIT_CLASSW;
+            g.previewEdit = CreateWindowExW(
+                0, cls, L"",
+                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+                2, 2, pw - 4, ph - 4, g.previewWnd, nullptr, g.inst, nullptr);
+            if (g.previewEdit) {
+                SendMessageW(g.previewEdit, EM_SETBKGNDCOLOR, 0,
+                             static_cast<LPARAM>(theme.bg));
+                RtfStreamData sd = {item->data.data(), item->data.size(), 0};
+                EDITSTREAM es = {};
+                es.dwCookie = reinterpret_cast<DWORD_PTR>(&sd);
+                es.pfnCallback = RtfStreamCallback;
+                SendMessageW(g.previewEdit, EM_STREAMIN, SF_RTF,
+                             reinterpret_cast<LPARAM>(&es));
+                SendMessageW(g.previewEdit, EM_SETSEL, 0, 0);
+                SendMessageW(g.previewEdit, EM_SCROLLCARET, 0, 0);
+            }
+        }
+        // If RichEdit failed, fall through to GDI text below
+        if (g.previewEdit) {
+            g.previewRow = rowIndex;
+            return;
+        }
+    } else {
+        DestroyPreviewEdit();
+    }
+
+    // GDI fallback: images and text types
     HDC dc = GetDC(g.previewWnd);
     RECT rc = {0, 0, pw, ph};
     HBRUSH bg = CreateSolidBrush(theme.bg);

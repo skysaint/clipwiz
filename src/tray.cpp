@@ -84,7 +84,8 @@ bool Restore() {
     return g_added;
 }
 
-UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostartOn) {
+UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostartOn,
+              const std::wstring& popupHotkeyText) {
     HMENU menu = CreatePopupMenu();
     if (!menu) {
         return 0;
@@ -108,7 +109,9 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
 
     // Show quick paste dialog (with hotkey display)
     std::wstring showPopupText = i18n::T("tray.show_popup");
-    showPopupText += L"\tCtrl+Alt+V";
+    if (!popupHotkeyText.empty()) {
+        showPopupText += L"\t" + popupHotkeyText;
+    }
     AppendMenuW(menu, MF_STRING, CmdShowPopup, showPopupText.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CmdSettings, i18n::T("tray.settings"));

@@ -31,6 +31,7 @@ void SetTip(const std::wstring& tip);
 bool Restore();
 
 // Returns the command ID chosen by user, 0 if cancelled
-UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostartOn);
+UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostartOn,
+              const std::wstring& popupHotkeyText);
 
 }  // namespace tray

@@ -26,17 +26,16 @@ const wchar_t* AppName();
 std::wstring ExePath();
 std::wstring ExeDir();
 
-// Data directory defaults to exe directory (portable); can be changed via SetDataDir
+// Data directory: auto-detects portable vs installed mode.
+// If config.ini exists next to exe → portable (exe dir). Otherwise → %APPDATA%\ClipWiz.
 const std::wstring& DataDir();
 void SetDataDir(const std::wstring& dir);
+std::wstring AppDataDir();          // %APPDATA%\ClipWiz
+bool IsPortable();                  // true if data lives next to exe
+bool MigrateDataDir(bool toPortable);  // Move data files between locations
 std::wstring ConfigPath();
 std::wstring StorePath();
 bool EnsureDir(const std::wstring& dir);
-
-// Path handling: convert to relative path (if under exe directory)
-std::wstring MakeRelativePath(const std::wstring& absPath);
-// Path handling: convert to absolute path (for file dialogs)
-std::wstring MakeAbsolutePath(const std::wstring& relPath);
 
 bool ReadWholeFile(const std::wstring& path, std::vector<uint8_t>& out);
 // Atomic write: write temp file -> flush -> replace. Worst case on power failure reverts to last complete version

@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <objbase.h>
+#include <csignal>
 
 #include "app.h"
 #include "log.h"
@@ -18,6 +19,35 @@ bool HandOffToRunningInstance() {
     return true;
 }
 
+// Top-level crash handler: log exception info before process dies
+LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
+    if (ep && ep->ExceptionRecord) {
+        LOG_ERROR("CRASH: code=0x%08X addr=0x%p flags=0x%X",
+                  ep->ExceptionRecord->ExceptionCode,
+                  ep->ExceptionRecord->ExceptionAddress,
+                  ep->ExceptionRecord->ExceptionFlags);
+    } else {
+        LOG_ERROR("CRASH: unknown exception (no ExceptionRecord)");
+    }
+    logger::Shutdown();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// Vectored handler: fires before SEH, catches more crash types
+LONG WINAPI VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
+    // Only log fatal exceptions (access violation, stack overflow, etc.)
+    if (ep && ep->ExceptionRecord) {
+        DWORD code = ep->ExceptionRecord->ExceptionCode;
+        if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_STACK_OVERFLOW ||
+            code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == 0xE0000001 /*heap corruption*/) {
+            LOG_ERROR("VEH-CRASH: code=0x%08X addr=0x%p", code,
+                      ep->ExceptionRecord->ExceptionAddress);
+            logger::Shutdown();
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;  // Let normal SEH handling proceed
+}
+
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdLine, int showCmd) {
@@ -27,6 +57,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdLine, int showCm
 
     // Initialize logging system
     logger::Init();
+    AddVectoredExceptionHandler(1, VectoredCrashHandler);
+    SetUnhandledExceptionFilter(CrashHandler);
     LOG_INFO("ClipWiz starting...");
 
     // Initialize Common Controls (required for PropertySheet, tray icon, modern controls)

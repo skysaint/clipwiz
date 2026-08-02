@@ -3,7 +3,6 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
-#include <shlobj.h>
 
 #include "resource.h"
 
@@ -165,14 +164,16 @@ void PopulateControls(HWND hwnd) {
              BS_PUSHBUTTON | WS_TABSTOP, kFieldX + 146, y, 100, kBtnH, IDC_FONT_RESET);
     y += kRowH;
 
-    // Data directory
+    // Data storage location
     MakeLabel(hwnd, i18n::T("settings.data_dir"), kPad, y + 2, kLabelW, 16);
-    std::wstring displayDir = cfg.dataDir.empty() ? L"." : util::MakeRelativePath(cfg.dataDir);
-    MakeCtrl(hwnd, L"EDIT", displayDir.c_str(),
-             ES_AUTOHSCROLL | ES_READONLY | WS_TABSTOP,
-             kFieldX, y, 210, kEditH, IDC_DATADIR, WS_EX_CLIENTEDGE);
-    MakeCtrl(hwnd, L"BUTTON", L"...",
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + 215, y, 26, kEditH, IDC_DATADIR_BTN);
+    HWND cbData = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                           CBS_DROPDOWNLIST | WS_TABSTOP,
+                           kFieldX, y, kFieldW, 120, IDC_DATADIR);
+    SendMessageW(cbData, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.data_installed")));
+    SendMessageW(cbData, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.data_portable")));
+    SendMessageW(cbData, CB_SETCURSEL, util::IsPortable() ? 1 : 0, 0);
     y += kRowH + 8;
 
     // ===================== Section 2: Shortcuts =====================
@@ -275,6 +276,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     bool w = IsDlgButtonChecked(hwnd, IDC_PIN_WIN_BASE + i) == BST_CHECKED;
                     cfg.pinnedHotkeys[i] = hotkey::FromControl(r, w);
                 }
+                // Data storage mode migration
+                int dataSel = static_cast<int>(
+                    SendDlgItemMessageW(hwnd, IDC_DATADIR, CB_GETCURSEL, 0, 0));
+                bool wantPortable = (dataSel == 1);
+                if (wantPortable != util::IsPortable()) {
+                    util::MigrateDataDir(wantPortable);
+                }
                 g_resultOk = true;
                 EndDialog(hwnd, IDOK);
                 return TRUE;
@@ -309,25 +317,6 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 g_cfg->fontName.clear();
                 g_cfg->fontSize = 0;
                 SetDlgItemTextW(hwnd, IDC_FONT_BTN, i18n::T("settings.font_default_val"));
-                return TRUE;
-            }
-            if (id == IDC_DATADIR_BTN) {
-                wchar_t path[MAX_PATH] = {};
-                BROWSEINFOW bi{};
-                bi.hwndOwner = hwnd;
-                bi.pszDisplayName = path;
-                bi.lpszTitle = i18n::T("settings.data_dir");
-                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-                PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-                if (pidl) {
-                    if (SHGetPathFromIDListW(pidl, path)) {
-                        std::wstring sel = path;
-                        std::wstring disp = util::MakeRelativePath(sel);
-                        g_cfg->dataDir = disp;
-                        SetDlgItemTextW(hwnd, IDC_DATADIR, disp.c_str());
-                    }
-                    CoTaskMemFree(pidl);
-                }
                 return TRUE;
             }
             break;
@@ -376,7 +365,9 @@ std::vector<WORD> BuildEmptyDlgTemplate() {
 
 Config Defaults() {
     Config cfg;
-    cfg.popupHotkey = hotkey::Make(MOD_CONTROL | MOD_ALT, 'V');
+    cfg.popupHotkey = hotkey::Make(MOD_CONTROL | MOD_ALT, 'K');
+    cfg.pinnedHotkeys[0] = hotkey::Make(MOD_CONTROL | MOD_ALT, '1');
+    cfg.pinnedHotkeys[1] = hotkey::Make(MOD_CONTROL | MOD_ALT, '2');
     cfg.expiryDays = 5;
     return cfg;
 }
@@ -441,7 +432,6 @@ void Load(Config& cfg) {
         if (!v.empty())
             cfg.pinnedHotkeys[i] = static_cast<uint32_t>(std::strtoul(v.c_str(), nullptr, 10));
     }
-    cfg.dataDir = Widen(getStr("DataDir"));
     cfg.fontName = Widen(getStr("FontName"));
     cfg.fontSize = getInt("FontSize", 0);
 }
@@ -466,7 +456,6 @@ bool Save(const Config& cfg) {
                  + std::to_string(cfg.pinnedHotkeys[i]) + "\n";
     }
     if (!cfg.language.empty()) ini += "Language=" + Narrow(cfg.language) + "\n";
-    if (!cfg.dataDir.empty()) ini += "DataDir=" + Narrow(cfg.dataDir) + "\n";
     if (cfg.fontSize > 0) ini += "FontSize=" + std::to_string(cfg.fontSize) + "\n";
     if (!cfg.fontName.empty()) ini += "FontName=" + Narrow(cfg.fontName) + "\n";
     return util::WriteFileAtomic(util::ConfigPath(), ini.data(), ini.size());

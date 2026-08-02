@@ -15,7 +15,7 @@ enum class ThemeMode : int { Auto = 0, Light = 1, Dark = 2 };
 struct Config {
     int maxHistory = 50;
     int expiryDays = 0;              // 0 = never expire
-    uint32_t popupHotkey = 0;        // default Ctrl+Alt+V, see Defaults()
+    uint32_t popupHotkey = 0;        // default Ctrl+Alt+K, see Defaults()
     uint32_t pinnedHotkeys[10] = {}; // positional: hotkey for the Nth pinned item
     int pasteDelayMs = 60;
     ThemeMode theme = ThemeMode::Auto;
@@ -24,7 +24,6 @@ struct Config {
     int popupPosition = 0;           // 0=mouse 1=caret 2=last position
     int lastPopupX = -1;
     int lastPopupY = -1;
-    std::wstring dataDir;            // empty = exe directory
     std::wstring fontName;           // empty = system default
     int fontSize = 0;                // 0 = default
     uint32_t maxTextBytes = 1024u * 1024u;

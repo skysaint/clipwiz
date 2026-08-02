@@ -40,10 +40,8 @@ bool App::Init(HINSTANCE inst) {
     settings::Load(cfg_);
     settings::Clamp(cfg_);
 
-    // Data directory
-    if (!cfg_.dataDir.empty()) {
-        util::SetDataDir(cfg_.dataDir);
-    }
+    // Data directory is auto-detected (portable vs installed)
+    // No manual override needed
 
     // i18n
     i18n::Init(cfg_.language);
@@ -342,7 +340,8 @@ void App::OnTrayMessage(UINT mouseMsg) {
                     break;
                 }
             }
-            UINT cmd = tray::ShowMenu(hwnd_, pinned, util::GetAutostart());
+            UINT cmd = tray::ShowMenu(hwnd_, pinned, util::GetAutostart(),
+                                      hotkey::ToText(cfg_.popupHotkey));
             if (cmd != 0) {
                 OnCommand(cmd);
             }
@@ -456,7 +455,7 @@ void App::DeleteItem(uint64_t id) {
         if (overPopup) {
             popup::BeginModal();
         }
-        bool ok = util::ConfirmBox(overPopup ? popup::Window() : hwnd_,
+        bool ok = util::ConfirmBox(overPopup ? popup::Window() : nullptr,
                                    i18n::T("msg.confirm_delete_pinned"));
         if (overPopup) {
             popup::EndModal();
@@ -527,9 +526,6 @@ void App::ApplyTheme() {
 void App::ApplyConfig() {
     ApplyTheme();
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
-    if (!cfg_.dataDir.empty()) {
-        util::SetDataDir(cfg_.dataDir);
-    }
     i18n::Init(cfg_.language);
     popup::OnThemeChanged();
     popup::OnDataChanged();
@@ -554,7 +550,7 @@ void App::RegisterAllHotkeys(bool reportFailures) {
     if (reportFailures && !hotkeyFailures_.empty()) {
         std::wstring msg = std::wstring(i18n::T("msg.hotkey_conflict")) + L"\n" + hotkeyFailures_ +
                            L"\n" + i18n::T("msg.hotkey_suggest");
-        util::ErrorBox(hwnd_, msg);
+        util::ErrorBox(nullptr, msg);
     }
 }
 
@@ -718,7 +714,7 @@ void App::ShowAbout() {
 }
 
 void App::ClearHistory() {
-    if (!util::ConfirmBox(hwnd_, i18n::T("msg.confirm_clear"))) {
+    if (!util::ConfirmBox(nullptr, i18n::T("msg.confirm_clear"))) {
         return;
     }
     // Only delete unpinned items
@@ -745,7 +741,7 @@ void App::CheckStoreSize() {
     }
     sizeWarned_ = true;
     // Prompt user for cleanup
-    if (!util::ConfirmBox(hwnd_, i18n::T("msg.large_data"))) {
+    if (!util::ConfirmBox(nullptr, i18n::T("msg.large_data"))) {
         return;
     }
     // Remove unpinned items exceeding threshold

@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "resource.h"
 #include "util.h"
 
 namespace i18n {
@@ -66,8 +67,9 @@ const Entry kDefaults[] = {
     {"settings.font", L"Display font:"},
     {"settings.font_default", L"Restore default"},
     {"settings.font_default_val", L"(System default)"},
-    {"settings.data_dir", L"Data directory:"},
-    {"settings.browse", L"..."},
+    {"settings.data_dir", L"Data storage:"},
+    {"settings.data_installed", L"User directory (recommended)"},
+    {"settings.data_portable", L"Program directory (portable)"},
     {"settings.popup_hotkey", L"Open quick paste:"},
     {"settings.pinned_group", L"Pinned item shortcuts"},
     {"settings.position", L"Pos"},
@@ -196,6 +198,74 @@ void LoadLngFile(const std::wstring& path) {
     }
 }
 
+// Load language data from a compiled-in RCDATA resource
+void LoadLngResource(int resourceId) {
+    HMODULE hMod = GetModuleHandleW(nullptr);
+    HRSRC hRes = FindResourceW(hMod, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
+    if (!hRes) {
+        return;
+    }
+    HGLOBAL hMem = LoadResource(hMod, hRes);
+    if (!hMem) {
+        return;
+    }
+    const char* data = static_cast<const char*>(LockResource(hMem));
+    DWORD size = SizeofResource(hMod, hRes);
+    if (!data || size == 0) {
+        return;
+    }
+    // Strip BOM if present
+    size_t start = 0;
+    if (size >= 3 && static_cast<unsigned char>(data[0]) == 0xEF &&
+        static_cast<unsigned char>(data[1]) == 0xBB &&
+        static_cast<unsigned char>(data[2]) == 0xBF) {
+        start = 3;
+    }
+    std::string content(data + start, static_cast<size_t>(size) - start);
+
+    // Parse key=value lines (same logic as LoadLngFile)
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t eol = content.find('\n', pos);
+        std::string line = content.substr(pos, eol == std::string::npos ? std::string::npos
+                                                                        : eol - pos);
+        pos = (eol == std::string::npos) ? content.size() : eol + 1;
+
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+            line.pop_back();
+        }
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        size_t eq = line.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            continue;
+        }
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) {
+            key.pop_back();
+        }
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) {
+            val.erase(val.begin());
+        }
+        if (!key.empty() && !val.empty()) {
+            std::string processed;
+            processed.reserve(val.size());
+            for (size_t i = 0; i < val.size(); ++i) {
+                if (val[i] == '\\' && i + 1 < val.size()) {
+                    char next = val[i + 1];
+                    if (next == 'n') { processed += '\n'; ++i; continue; }
+                    if (next == 't') { processed += '\t'; ++i; continue; }
+                    if (next == '\\') { processed += '\\'; ++i; continue; }
+                }
+                processed += val[i];
+            }
+            g_map[key] = Utf8ToWide(processed);
+        }
+    }
+}
+
 }  // namespace
 
 void Init(const std::wstring& langCode) {
@@ -223,7 +293,7 @@ void Init(const std::wstring& langCode) {
         return;
     }
 
-    // Try to load lang/<locale>.lng
+    // Try to load lang/<locale>.lng from disk (external file takes priority)
     std::wstring path = util::ExeDir() + L"\\lang\\" + effective + L".lng";
     LoadLngFile(path);
 
@@ -237,6 +307,11 @@ void Init(const std::wstring& langCode) {
             path = util::ExeDir() + L"\\lang\\" + fallback + L".lng";
             LoadLngFile(path);
         }
+    }
+
+    // If still empty and language is Chinese, fall back to built-in resource
+    if (g_map.empty() && effective.compare(0, 2, L"zh") == 0) {
+        LoadLngResource(IDR_LNG_ZHCN);
     }
 
     g_lang = g_map.empty() ? L"" : effective;

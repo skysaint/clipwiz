@@ -113,10 +113,21 @@ if !ERRORLEVEL! neq 0 (
 echo.
 echo  [Build] Done. Output: build\Release\clipwiz.exe
 echo.
-echo  [Deploy] Copying lang\ to build\Release\ ...
-if not exist build\Release\lang mkdir build\Release\lang
-xcopy /Y /Q lang\*.lng build\Release\lang\ >nul
-echo  [Deploy] Done. build\Release\ is ready to use.
+:: Deploy: copy non-built-in language files (zh-CN is compiled into exe)
+set "has_extra_lng=false"
+for %%f in (lang\*.lng) do (
+    if /i not "%%~nxf"=="zh-CN.lng" set "has_extra_lng=true"
+)
+if "!has_extra_lng!"=="true" (
+    echo  [Deploy] Copying extra language files to build\Release\lang\ ...
+    if not exist build\Release\lang mkdir build\Release\lang
+    for %%f in (lang\*.lng) do (
+        if /i not "%%~nxf"=="zh-CN.lng" copy /Y "%%f" build\Release\lang\ >nul
+    )
+    echo  [Deploy] Done.
+) else (
+    echo  [Deploy] No extra language files. Release is a single exe.
+)
 if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
 pause
 goto :MENU_START
@@ -186,10 +197,21 @@ if !ERRORLEVEL! neq 0 (
 echo.
 echo  [Rebuild] Done. Output: build\Release\clipwiz.exe
 echo.
-echo  [Deploy] Copying lang\ to build\Release\ ...
-if not exist build\Release\lang mkdir build\Release\lang
-xcopy /Y /Q lang\*.lng build\Release\lang\ >nul
-echo  [Deploy] Done. build\Release\ is ready to use.
+:: Deploy: copy non-built-in language files (zh-CN is compiled into exe)
+set "has_extra_lng=false"
+for %%f in (lang\*.lng) do (
+    if /i not "%%~nxf"=="zh-CN.lng" set "has_extra_lng=true"
+)
+if "!has_extra_lng!"=="true" (
+    echo  [Deploy] Copying extra language files to build\Release\lang\ ...
+    if not exist build\Release\lang mkdir build\Release\lang
+    for %%f in (lang\*.lng) do (
+        if /i not "%%~nxf"=="zh-CN.lng" copy /Y "%%f" build\Release\lang\ >nul
+    )
+    echo  [Deploy] Done.
+) else (
+    echo  [Deploy] No extra language files. Release is a single exe.
+)
 if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
 pause
 goto :MENU_START
