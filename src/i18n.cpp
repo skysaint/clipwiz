@@ -16,14 +16,14 @@ namespace {
 std::wstring g_lang;
 std::unordered_map<std::string, std::wstring> g_map;
 
-// 内置英文（主表），所有用户可见文字都在这里注册
+// Built-in English (master table), all user-visible strings registered here
 struct Entry {
     const char* key;
     const wchar_t* en;
 };
 
 const Entry kDefaults[] = {
-    // 托盘菜单
+    // Tray menu
     {"tray.show_popup", L"Open Quick Paste"},
     {"tray.settings", L"Settings"},
     {"tray.autostart", L"Start with Windows"},
@@ -31,7 +31,7 @@ const Entry kDefaults[] = {
     {"tray.about", L"About"},
     {"tray.exit", L"Exit"},
 
-    // 快速粘贴框
+    // Quick paste popup
     {"popup.title", L"ClipWiz"},
     {"popup.filter_hint", L"Type to filter..."},
     {"popup.hint",
@@ -44,7 +44,7 @@ const Entry kDefaults[] = {
     {"popup.menu.unpin", L"Unpin"},
     {"popup.menu.delete", L"Delete"},
 
-    // 设置对话框
+    // Settings dialog
     {"settings.title", L"ClipWiz Settings"},
     {"settings.tab.general", L"General"},
     {"settings.tab.types", L"Supported Types"},
@@ -54,6 +54,7 @@ const Entry kDefaults[] = {
     {"settings.max_history", L"Max saved items:"},
     {"settings.expiry_days", L"Item expiry (days):"},
     {"settings.language", L"Language:"},
+    {"settings.lang_auto", L"Follow system"},
     {"settings.theme", L"Theme:"},
     {"settings.theme_auto", L"Follow system"},
     {"settings.theme_light", L"Light"},
@@ -62,8 +63,9 @@ const Entry kDefaults[] = {
     {"settings.pos_mouse", L"At mouse pointer"},
     {"settings.pos_caret", L"At text cursor"},
     {"settings.pos_last", L"Last opened position"},
-    {"settings.font", L"Display font"},
+    {"settings.font", L"Display font:"},
     {"settings.font_default", L"Restore default"},
+    {"settings.font_default_val", L"(System default)"},
     {"settings.data_dir", L"Data directory:"},
     {"settings.browse", L"..."},
     {"settings.popup_hotkey", L"Open quick paste:"},
@@ -73,7 +75,7 @@ const Entry kDefaults[] = {
     {"settings.ok", L"OK"},
     {"settings.cancel", L"Cancel"},
 
-    // 支持类型描述
+    // Supported type descriptions
     {"type.text.name", L"Text (CF_UNICODETEXT)"},
     {"type.text.desc",
      L"Plain Unicode text. Produced by virtually all applications when copying text."},
@@ -91,7 +93,7 @@ const Entry kDefaults[] = {
      L"File/folder path list. Produced by Explorer when copying files. Stores paths, not file "
      L"contents."},
 
-    // 消息
+    // Messages
     {"msg.select_pinned", L"Please select a pinned item from the list first."},
     {"msg.confirm_delete_pinned", L"This item is pinned. Delete it permanently?"},
     {"msg.confirm_clear", L"Clear all non-pinned history?"},
@@ -109,20 +111,20 @@ const Entry kDefaults[] = {
     {"msg.large_data",
      L"Clipboard data has grown very large. Clean up large non-pinned items now?"},
 
-    // 预览
+    // Preview
     {"preview.image", L"[Image %u\x00D7%u]"},
     {"preview.files", L"%d files: %s"},
     {"preview.empty", L"[Empty content]"},
 
-    // 关于
-    {"about.text", L"ClipWiz %s\nLightweight clipboard manager.\nData stored locally, nothing "
+    // About
+    {"about.text", L"ClipWiz %s\nLightweight clipboard history tool.\nData stored locally, nothing "
                    L"leaves your PC."},
 
-    // 快捷键对话框（已废弃，保留键以防万一）
+    // Hotkey dialog (deprecated, key kept for safety)
     {"hotkey.clear", L"Unbind"},
 };
 
-// UTF-8 → UTF-16
+// UTF-8 -> UTF-16
 std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) {
         return {};
@@ -141,7 +143,7 @@ void LoadLngFile(const std::wstring& path) {
     if (!util::ReadWholeFile(path, raw)) {
         return;
     }
-    // 去 BOM
+    // Strip BOM
     size_t start = 0;
     if (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) {
         start = 3;
@@ -155,11 +157,11 @@ void LoadLngFile(const std::wstring& path) {
                                                                         : eol - pos);
         pos = (eol == std::string::npos) ? content.size() : eol + 1;
 
-        // 去 \r
+        // Strip \r
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
             line.pop_back();
         }
-        // 跳过空行和注释
+        // Skip empty lines and comments
         if (line.empty() || line[0] == '#') {
             continue;
         }
@@ -169,7 +171,7 @@ void LoadLngFile(const std::wstring& path) {
         }
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
-        // 去 key 两端空白
+        // Trim key whitespace
         while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) {
             key.pop_back();
         }
@@ -177,7 +179,19 @@ void LoadLngFile(const std::wstring& path) {
             val.erase(val.begin());
         }
         if (!key.empty() && !val.empty()) {
-            g_map[key] = Utf8ToWide(val);
+            // Process escape sequences: \n -> newline, \t -> tab
+            std::string processed;
+            processed.reserve(val.size());
+            for (size_t i = 0; i < val.size(); ++i) {
+                if (val[i] == '\\' && i + 1 < val.size()) {
+                    char next = val[i + 1];
+                    if (next == 'n') { processed += '\n'; ++i; continue; }
+                    if (next == 't') { processed += '\t'; ++i; continue; }
+                    if (next == '\\') { processed += '\\'; ++i; continue; }
+                }
+                processed += val[i];
+            }
+            g_map[key] = Utf8ToWide(processed);
         }
     }
 }
@@ -187,21 +201,54 @@ void LoadLngFile(const std::wstring& path) {
 void Init(const std::wstring& langCode) {
     g_map.clear();
     g_lang = langCode;
-    if (langCode.empty() || langCode == L"en" || langCode == L"English") {
+
+    // Explicitly set to English
+    if (langCode == L"en" || langCode == L"English") {
         g_lang = L"";
         return;
     }
-    std::wstring path = util::ExeDir() + L"\\lang\\" + langCode + L".lng";
+
+    std::wstring effective = langCode;
+
+    // Empty string = follow system language
+    if (effective.empty()) {
+        wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
+        if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) > 0) {
+            effective = locale;  // e.g. "zh-CN", "en-US", "ja-JP"
+        }
+    }
+
+    if (effective.empty() || effective.compare(0, 2, L"en") == 0) {
+        g_lang = L"";
+        return;
+    }
+
+    // Try to load lang/<locale>.lng
+    std::wstring path = util::ExeDir() + L"\\lang\\" + effective + L".lng";
     LoadLngFile(path);
+
+    // If full locale not found (e.g. "zh-TW"), try matching language prefix only ("zh")
+    if (g_map.empty()) {
+        size_t dash = effective.find(L'-');
+        if (dash != std::wstring::npos) {
+            std::wstring prefix = effective.substr(0, dash);
+            // Try prefix again: zh -> zh-CN (conventional primary variant)
+            std::wstring fallback = prefix + L"-CN";
+            path = util::ExeDir() + L"\\lang\\" + fallback + L".lng";
+            LoadLngFile(path);
+        }
+    }
+
+    g_lang = g_map.empty() ? L"" : effective;
 }
 
 const wchar_t* T(const char* key) {
-    // 先查加载的翻译
+    // Check loaded translations first
     auto it = g_map.find(key);
     if (it != g_map.end()) {
         return it->second.c_str();
     }
-    // 回退到内置英文
+    // Fall back to built-in English
     for (const Entry& e : kDefaults) {
         if (strcmp(e.key, key) == 0) {
             return e.en;

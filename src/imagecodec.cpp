@@ -8,7 +8,7 @@
 namespace imagecodec {
 namespace {
 
-// 极简 COM 智能指针，避免到处写 Release
+// Minimal COM smart pointer to avoid manual Release everywhere
 template <typename T>
 class Com {
 public:
@@ -40,7 +40,7 @@ struct DibInfo {
     const uint8_t* bits = nullptr;
     size_t bitsSize = 0;
     int width = 0;
-    int height = 0;   // 绝对值
+    int height = 0;   // absolute value
     int bpp = 0;
     bool topDown = false;
 };
@@ -50,7 +50,7 @@ size_t ColorTableBytes(const BITMAPINFOHEADER* head) {
         DWORD used = head->biClrUsed ? head->biClrUsed : (1u << head->biBitCount);
         return static_cast<size_t>(used) * sizeof(RGBQUAD);
     }
-    // 只有 BITMAPINFOHEADER 且 BI_BITFIELDS 时，头后面跟着三个掩码
+    // Only BITMAPINFOHEADER with BI_BITFIELDS has three masks after the header
     if (head->biCompression == BI_BITFIELDS && head->biSize == sizeof(BITMAPINFOHEADER)) {
         return 3 * sizeof(DWORD);
     }
@@ -66,7 +66,7 @@ bool ParseDib(const void* data, size_t size, DibInfo& out) {
         return false;
     }
     if (head->biCompression != BI_RGB && head->biCompression != BI_BITFIELDS) {
-        return false;  // RLE 压缩的 DIB 极罕见，直接不收
+        return false;  // RLE-compressed DIBs are extremely rare, skip
     }
     if (head->biWidth <= 0 || head->biHeight == 0 || head->biPlanes != 1) {
         return false;
@@ -85,7 +85,7 @@ bool ParseDib(const void* data, size_t size, DibInfo& out) {
     return true;
 }
 
-// 任意格式 DIB → 自顶向下的 32 位 BGRA
+// Any format DIB -> top-down 32-bit BGRA
 bool DibToBgra(const void* data, size_t size, std::vector<uint8_t>& bgra, int& width,
                int& height) {
     DibInfo info;
@@ -98,7 +98,7 @@ bool DibToBgra(const void* data, size_t size, std::vector<uint8_t>& bgra, int& w
     bgra.assign(rowBytes * static_cast<size_t>(height), 0);
 
     if (info.bpp == 32) {
-        // 32 位直接搬，顺手保住 alpha
+        // 32-bit: copy directly, preserving alpha
         const size_t srcStride = rowBytes;
         if (info.bitsSize < srcStride * static_cast<size_t>(height)) {
             return false;
@@ -116,7 +116,7 @@ bool DibToBgra(const void* data, size_t size, std::vector<uint8_t>& bgra, int& w
             }
         }
         if (!anyAlpha) {
-            // 有些程序放的 32 位图 alpha 全 0，那就是不透明
+            // Some programs set all alpha to 0 in 32-bit bitmaps; treat as opaque
             for (size_t x = 3; x < bgra.size(); x += 4) {
                 bgra[x] = 255;
             }
@@ -124,11 +124,11 @@ bool DibToBgra(const void* data, size_t size, std::vector<uint8_t>& bgra, int& w
         return true;
     }
 
-    // 其他位深交给 GDI 转换，省掉手写调色板/掩码解码
+    // Other bit depths converted via GDI, avoiding manual palette/mask decoding
     BITMAPINFO dstInfo{};
     dstInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     dstInfo.bmiHeader.biWidth = width;
-    dstInfo.bmiHeader.biHeight = -height;  // 自顶向下
+    dstInfo.bmiHeader.biHeight = -height;  // top-down
     dstInfo.bmiHeader.biPlanes = 1;
     dstInfo.bmiHeader.biBitCount = 32;
     dstInfo.bmiHeader.biCompression = BI_RGB;
@@ -226,7 +226,7 @@ bool DecodePngMemory(const uint8_t* png, size_t size, std::vector<uint8_t>& bgra
     if (!g_factory || !png || size == 0) {
         return false;
     }
-    // 把 PNG 字节放进 IStream
+    // Put PNG bytes into IStream
     HGLOBAL hglobal = GlobalAlloc(GMEM_MOVEABLE, size);
     if (!hglobal) {
         return false;
@@ -313,14 +313,14 @@ void FillBitmapInfoHeader(BITMAPINFOHEADER& head, uint32_t width, uint32_t heigh
                           uint32_t imageBytes) {
     head.biSize = sizeof(BITMAPINFOHEADER);
     head.biWidth = static_cast<LONG>(width);
-    head.biHeight = static_cast<LONG>(height);  // 正数 = 自底向上，兼容性最好
+    head.biHeight = static_cast<LONG>(height);  // positive = bottom-up, best compatibility
     head.biPlanes = 1;
     head.biBitCount = 32;
     head.biCompression = BI_RGB;
     head.biSizeImage = imageBytes;
 }
 
-// 把自顶向下的 BGRA 翻成自底向上
+// Flip top-down BGRA to bottom-up
 void FlipRowsInto(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height) {
     const size_t rowBytes = static_cast<size_t>(width) * 4;
     for (uint32_t y = 0; y < height; ++y) {
@@ -337,7 +337,10 @@ bool Init() {
     }
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&g_factory));
-    return SUCCEEDED(hr) && g_factory != nullptr;
+    if (FAILED(hr) || g_factory == nullptr) {
+        return false;
+    }
+    return true;
 }
 
 void Shutdown() {
@@ -391,7 +394,7 @@ bool HBitmapToPng(HBITMAP bitmap, std::vector<uint8_t>& png, uint32_t& width, ui
         return false;
     }
     for (size_t x = 3; x < bgra.size(); x += 4) {
-        bgra[x] = 255;  // HBITMAP 路径没有可靠的 alpha，当不透明处理
+        bgra[x] = 255;  // HBITMAP path has no reliable alpha, treat as opaque
     }
     if (!EncodePng(bgra.data(), info.bmWidth, info.bmHeight, png)) {
         return false;

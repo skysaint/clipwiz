@@ -31,6 +31,9 @@ settings.autostart_yes=是
 settings.max_history=保存复制项目的最大数量：
 settings.expiry_days=粘贴条目的过期天数：
 settings.language=语言：
+settings.lang_auto=跟随系统
+settings.lang_en=English
+settings.lang_zh=简体中文
 settings.theme=主题：
 settings.theme_auto=跟随系统
 settings.theme_light=浅色
@@ -39,8 +42,10 @@ settings.popup_pos=窗口弹出位置：
 settings.pos_mouse=鼠标指针处
 settings.pos_caret=光标处
 settings.pos_last=上次打开的位置
-settings.font=显示字体
+settings.font=显示字体：
 settings.font_default=恢复默认
+settings.font_default_val=（系统默认）
+settings.font_reset=重置
 settings.data_dir=数据库路径：
 settings.browse=...
 settings.popup_hotkey=唤出快速粘贴框：
@@ -83,7 +88,7 @@ preview.files=%d 个文件: %s
 preview.empty=[空白内容]
 
 # 关于
-about.text=ClipWiz %s\n轻量剪贴板管理工具。\n数据全部存在本地，不联网。
+about.text=ClipWiz %s\n轻量剪贴板历史记录工具。\n数据全部存在本地，不联网。
 
 # 快捷键
 hotkey.clear=解除

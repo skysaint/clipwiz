@@ -3,13 +3,13 @@
 #include "resource.h"
 
 /////////////////////////////////////////////////////////////////////////////
-// 图标与 manifest
+// Icon and manifest
 
 IDI_APPICON             ICON            "clipwiz.ico"
 1                       RT_MANIFEST     "app.manifest"
 
 /////////////////////////////////////////////////////////////////////////////
-// 版本信息
+// Version information
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,1,0,0
@@ -25,7 +25,7 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "CompanyName",      "ClipWiz"
-            VALUE "FileDescription",  "ClipWiz - lightweight clipboard manager"
+            VALUE "FileDescription",  "ClipWiz - lightweight clipboard history tool"
             VALUE "FileVersion",      "1.1.0.0"
             VALUE "InternalName",     "clipwiz"
             VALUE "LegalCopyright",   "ClipWiz"

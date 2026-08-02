@@ -6,6 +6,7 @@
 #include "clipboard.h"
 #include "i18n.h"
 #include "imagecodec.h"
+#include "log.h"
 #include "paste.h"
 #include "resource.h"
 #include "tray.h"
@@ -20,7 +21,7 @@ constexpr UINT kTimerWriteCheck = 2;
 constexpr int kSaveDelayMs = 800;
 constexpr int kWriteCheckMs = 200;
 
-// 总量超过这个值就提示用户清理（100 MB）
+// Prompt cleanup when total exceeds this value (100 MB)
 constexpr uint64_t kSizeWarnBytes = 100ULL * 1024 * 1024;
 
 }  // namespace
@@ -30,16 +31,16 @@ UINT SingleInstanceMessage() {
     return msg;
 }
 
-// ------------------------------------------------------------------ 初始化
+// ------------------------------------------------------------------ Initialization
 
 bool App::Init(HINSTANCE inst) {
     inst_ = inst;
 
-    // 加载配置
+    // Load config
     settings::Load(cfg_);
     settings::Clamp(cfg_);
 
-    // 数据目录
+    // Data directory
     if (!cfg_.dataDir.empty()) {
         util::SetDataDir(cfg_.dataDir);
     }
@@ -48,54 +49,81 @@ bool App::Init(HINSTANCE inst) {
     i18n::Init(cfg_.language);
 
     // WIC
-    imagecodec::Init();
+    if (!imagecodec::Init()) {
+        LOG_ERROR("WIC initialization failed");
+        util::ErrorBox(nullptr, L"Error ERR_WIC_INIT: Failed to initialize image codec (WIC).");
+        return false;
+    }
 
-    // 主题
+    // Theme
     ApplyTheme();
 
-    // 注册窗口类
+    // Register window class
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProcThunk;
     wc.hInstance = inst;
     wc.lpszClassName = kMainClass;
     if (!RegisterClassExW(&wc)) {
+        LOG_ERROR("Failed to register window class, error=%u", GetLastError());
+        util::ErrorBox(nullptr, L"Error ERR_WINDOW_CLASS: Failed to register window class.");
         return false;
     }
 
-    // 隐藏主窗口（消息载体）
+    // Hidden main window (message carrier)
     hwnd_ = CreateWindowExW(0, kMainClass, L"ClipWiz", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
                             nullptr, inst, this);
     if (!hwnd_) {
+        LOG_ERROR("Failed to create main window, error=%u", GetLastError());
+        util::ErrorBox(nullptr, L"Error ERR_WINDOW_CREATE: Failed to create main window.");
         return false;
     }
 
-    // 加载数据
+    // Load data
     Store::LoadResult lr = store_.Load();
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
     if (lr == Store::LoadResult::Corrupt) {
         util::ErrorBox(nullptr, i18n::T("msg.corrupt_found"));
     }
 
-    // 剪贴板监听
-    clip::StartListening(hwnd_);
+    // Clipboard listener
+    if (!clip::StartListening(hwnd_)) {
+        LOG_ERROR("Failed to start clipboard listener");
+        util::ErrorBox(nullptr, L"Error ERR_CLIPBOARD_LISTENER: Failed to start clipboard listener.");
+        return false;
+    }
 
-    // 前台窗口跟踪
-    paste::InstallHook();
+    // Foreground window tracking
+    if (!paste::InstallHook()) {
+        LOG_WARNING("Failed to install foreground window hook, paste target may be degraded");
+        // Failure doesn't break main flow, paste target just degrades to current foreground window
+    }
 
-    // 托盘
-    tray::Add(hwnd_, kMsgTray, IDI_APPICON);
+    // Tray - critical component, exit on failure
+    if (!tray::Add(hwnd_, kMsgTray, IDI_APPICON)) {
+        LOG_ERROR("Failed to add tray icon");
+        util::ErrorBox(nullptr, L"Error ERR_TRAY_ICON: Failed to create system tray icon.");
+        return false;
+    }
     tray::SetTip(L"ClipWiz");
 
-    // 快捷键
+    // Hotkeys
     hotkeys_.Attach(hwnd_);
     RegisterAllHotkeys(true);
 
-    // 异步写盘线程
-    writer_.Start();
+    // Async disk writer thread
+    if (!writer_.Start()) {
+        LOG_ERROR("Failed to start async writer thread");
+        util::ErrorBox(nullptr, L"Error ERR_ASYNC_WRITER: Failed to start background writer.");
+        return false;
+    }
 
-    // 弹出框
-    popup::Init(inst, this);
+    // Popup window
+    if (!popup::Init(inst, this)) {
+        LOG_ERROR("Failed to initialize popup window");
+        util::ErrorBox(nullptr, L"Error ERR_POPUP_INIT: Failed to initialize popup window.");
+        return false;
+    }
 
     return true;
 }
@@ -155,6 +183,11 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             OnCommand(LOWORD(wparam));
             return 0;
 
+        case WM_CLOSE:
+            LOG_INFO("WM_CLOSE received, initiating shutdown");
+            DestroyWindow(hwnd_);
+            return 0;
+
         case WM_TIMER:
             if (wparam == kTimerSave) {
                 OnTimerSave();
@@ -164,7 +197,7 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
 
         case WM_SETTINGCHANGE: {
-            // 深色模式切换
+            // Dark mode switch
             if (lparam && wcscmp(reinterpret_cast<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
                 ApplyTheme();
                 popup::OnThemeChanged();
@@ -183,14 +216,53 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
 
         case WM_DESTROY:
-            SaveNow();
+            LOG_INFO("WM_DESTROY received, starting shutdown sequence");
+            
+            // Decide exit strategy based on save state
+            if (saveState_ == SaveState::NoSaveNeeded) {
+                LOG_INFO("No save needed, data is already up to date");
+            } else if (saveState_ == SaveState::PendingSave) {
+                LOG_INFO("Pending save detected, cancelling timer and saving synchronously");
+                KillTimer(hwnd, kTimerSave);
+                saveState_ = SaveState::SavingInProgress;
+                store_.ExpireCheck();
+                {
+                    std::vector<uint8_t> buf = store_.Serialize();
+                    bool saved = util::WriteFileAtomic(util::StorePath(), buf.data(), buf.size());
+                    if (saved) {
+                        LOG_INFO("Data saved synchronously successfully");
+                    } else {
+                        LOG_ERROR("Failed to save data synchronously during shutdown");
+                    }
+                }
+            } else if (saveState_ == SaveState::SavingInProgress) {
+                LOG_INFO("Async save in progress, waiting for completion");
+                // Wait for async save to complete (max 5 seconds)
+                int waitCount = 0;
+                while (!writer_.Done() && waitCount < 50) {
+                    Sleep(100);
+                    waitCount++;
+                }
+                if (writer_.Done()) {
+                    LOG_INFO("Async save completed");
+                } else {
+                    LOG_WARNING("Async save did not complete in time, forcing shutdown");
+                }
+            }
+            
+            // Stop async writer thread (data already handled)
             writer_.Stop();
+            LOG_INFO("Async writer stopped");
+            
+            // Clean up other resources
             clip::StopListening(hwnd);
             paste::RemoveHook();
             hotkeys_.UnregisterAll();
             tray::Remove();
             popup::Shutdown();
             imagecodec::Shutdown();
+            
+            LOG_INFO("All resources cleaned up, posting quit message");
             PostQuitMessage(0);
             return 0;
 
@@ -200,7 +272,7 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-// ------------------------------------------------------------------ 事件处理
+// ------------------------------------------------------------------ Event handling
 
 void App::OnClipboardUpdate() {
     if (clip::IsSelfWrite()) {
@@ -224,16 +296,16 @@ void App::OnHotkey(int id) {
         popup::Toggle();
         return;
     }
-    // 位置式：id = kIdItemBase + 位置索引
+    // Positional: id = kIdItemBase + position index
     int index = id - hotkey::kIdItemBase;
     if (index < 0 || index >= 10) {
         return;
     }
-    // 找第 index 个置顶项
+    // Find the Nth pinned item
     int seen = 0;
     for (const Item& item : store_.Items()) {
         if (!item.pinned) {
-            break;  // 置顶区在前面
+            break;  // Pinned section is at the front
         }
         if (seen == index) {
             paste::CaptureCurrentForeground();
@@ -247,12 +319,12 @@ void App::OnHotkey(int id) {
 void App::OnTrayMessage(UINT mouseMsg) {
     switch (mouseMsg) {
         case WM_LBUTTONUP:
-            // 单击弹出
+            // Single click to show popup
             paste::CaptureCurrentForeground();
             popup::Toggle();
             break;
         case WM_RBUTTONUP: {
-            // 右键菜单
+            // Right-click context menu
             std::vector<tray::PinnedEntry> pinned;
             int idx = 0;
             for (const Item& item : store_.Items()) {
@@ -304,11 +376,11 @@ void App::OnCommand(UINT cmd) {
         return;
     }
     if (cmd == tray::CmdExit) {
-        SaveNow();
+        LOG_INFO("Exit command received");
         DestroyWindow(hwnd_);
         return;
     }
-    // 置顶项菜单直贴
+    // Pinned item direct paste from menu
     if (cmd >= tray::CmdPinnedBase && cmd < tray::CmdPinnedBase + 20) {
         int index = static_cast<int>(cmd - tray::CmdPinnedBase);
         int seen = 0;
@@ -328,17 +400,18 @@ void App::OnCommand(UINT cmd) {
 
 void App::OnTimerSave() {
     KillTimer(hwnd_, kTimerSave);
-    savePending_ = false;
+    saveState_ = SaveState::SavingInProgress;
     SaveNow();
 }
 
 void App::OnTimerWriteCheck() {
     if (writer_.Done()) {
         KillTimer(hwnd_, kTimerWriteCheck);
+        saveState_ = SaveState::NoSaveNeeded;
     }
 }
 
-// ------------------------------------------------------------------ Host 实现
+// ------------------------------------------------------------------ Host implementation
 
 void App::PasteItem(uint64_t id) {
     const Item* item = store_.Find(id);
@@ -415,6 +488,7 @@ void App::SaveLastPos(int x, int y) {
 
 void App::OpenSettings() {
     if (settingsOpen_) {
+        settings::ActivateExisting();
         return;
     }
     settingsOpen_ = true;
@@ -433,7 +507,7 @@ void App::OpenSettings() {
     settingsOpen_ = false;
 }
 
-// ------------------------------------------------------------------ 内部
+// ------------------------------------------------------------------ Internal
 
 void App::ApplyTheme() {
     bool dark = false;
@@ -485,34 +559,169 @@ void App::RegisterAllHotkeys(bool reportFailures) {
 }
 
 void App::ScheduleSave() {
-    if (!savePending_) {
-        savePending_ = true;
+    if (saveState_ == SaveState::NoSaveNeeded) {
+        saveState_ = SaveState::PendingSave;
         SetTimer(hwnd_, kTimerSave, kSaveDelayMs, nullptr);
     }
+    // If currently PendingSave or SavingInProgress, do nothing
+    // PendingSave: timer already set, no need to set again
+    // SavingInProgress: async save in progress, new data will be overwritten
 }
 
 void App::SaveNow() {
-    if (savePending_) {
+    // Cancel timer
+    if (saveState_ == SaveState::PendingSave) {
         KillTimer(hwnd_, kTimerSave);
-        savePending_ = false;
     }
+    
+    // Mark as saving in progress
+    saveState_ = SaveState::SavingInProgress;
+    
     store_.ExpireCheck();
     std::vector<uint8_t> buf = store_.Serialize();
     writer_.Submit(util::StorePath(), std::move(buf));
-    // 定时检查写盘完成
+    
+    // Timer to check write completion
     SetTimer(hwnd_, kTimerWriteCheck, kWriteCheckMs, nullptr);
 }
 
 void App::ShowAbout() {
-    std::wstring text = util::Format(i18n::T("about.text"), L"1.1.0");
-    util::InfoBox(hwnd_, text);
+    // Build about dialog with supported types in a left-right layout
+    // Use an in-memory dialog template (same approach as settings dialog)
+    struct AboutState {
+        static INT_PTR CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+            (void)lparam;
+            switch (msg) {
+                case WM_INITDIALOG: {
+                    int dpi = util::DpiOf(hwnd);
+                    auto S = [dpi](int v) { return MulDiv(v, dpi, 96); };
+
+                    // Get system font
+                    NONCLIENTMETRICSW ncm{};
+                    ncm.cbSize = sizeof(ncm);
+                    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0,
+                                               static_cast<UINT>(dpi));
+                    HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
+
+                    auto MkCtrl = [&](const wchar_t* cls, const wchar_t* text, DWORD style,
+                                      int x, int y, int w, int h, int id, DWORD ex = 0) -> HWND {
+                        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style,
+                            S(x), S(y), S(w), S(h), hwnd,
+                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                            GetModuleHandleW(nullptr), nullptr);
+                        if (c && font) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+                        return c;
+                    };
+
+                    // About text
+                    std::wstring aboutStr = util::Format(i18n::T("about.text"), L"1.1.0");
+                    MkCtrl(L"STATIC", aboutStr.c_str(), SS_LEFT, 12, 10, 420, 50, -1);
+
+                    // Separator
+                    MkCtrl(L"STATIC", L"", SS_ETCHEDHORZ, 12, 62, 420, 2, -1);
+
+                    // Types section header
+                    MkCtrl(L"STATIC", i18n::T("settings.tab.types"), SS_LEFT, 12, 70, 420, 16, -1);
+
+                    // Left: type list (height for 6 rows, 5 items + 1 empty row)
+                    constexpr int kListY = 90;
+                    constexpr int kListH = 108;
+                    HWND list = MkCtrl(L"LISTBOX", L"",
+                        LBS_NOTIFY | WS_TABSTOP, 12, kListY, 160, kListH, 2001, WS_EX_CLIENTEDGE);
+                    const char* typeKeys[] = {"type.text.name", "type.image.name",
+                        "type.html.name", "type.rtf.name", "type.filedrop.name"};
+                    for (const char* k : typeKeys)
+                        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T(k)));
+                    SendMessageW(list, LB_SETCURSEL, 0, 0);
+
+                    // Right: description (same height as list)
+                    MkCtrl(L"EDIT", i18n::T("type.text.desc"),
+                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                        178, kListY, 254, kListH, 2002, WS_EX_CLIENTEDGE);
+
+                    // OK button
+                    MkCtrl(L"BUTTON", i18n::T("settings.ok"),
+                        BS_DEFPUSHBUTTON | WS_TABSTOP, 180, kListY + kListH + 10, 80, 26, IDOK);
+
+                    // Resize and center
+                    constexpr int kDlgW = 450;
+                    constexpr int kDlgH = kListY + kListH + 10 + 26 + 12;
+                    RECT rc = {0, 0, S(kDlgW), S(kDlgH)};
+                    AdjustWindowRectEx(&rc, GetWindowLongW(hwnd, GWL_STYLE), FALSE,
+                                       GetWindowLongW(hwnd, GWL_EXSTYLE));
+                    int w = rc.right - rc.left;
+                    int h = rc.bottom - rc.top;
+                    RECT wa;
+                    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+                    SetWindowPos(hwnd, nullptr,
+                        wa.left + (wa.right - wa.left - w) / 2,
+                        wa.top + (wa.bottom - wa.top - h) / 2,
+                        w, h, SWP_NOZORDER);
+
+                    // Store font handle for cleanup
+                    SetPropW(hwnd, L"Font", font);
+                    return TRUE;
+                }
+                case WM_COMMAND: {
+                    int id = LOWORD(wparam);
+                    int notif = HIWORD(wparam);
+                    if (id == IDOK || id == IDCANCEL) {
+                        EndDialog(hwnd, IDOK);
+                        return TRUE;
+                    }
+                    if (id == 2001 && notif == LBN_SELCHANGE) {
+                        int sel = static_cast<int>(
+                            SendMessageW(GetDlgItem(hwnd, 2001), LB_GETCURSEL, 0, 0));
+                        const char* descKeys[] = {"type.text.desc", "type.image.desc",
+                            "type.html.desc", "type.rtf.desc", "type.filedrop.desc"};
+                        if (sel >= 0 && sel < 5)
+                            SetDlgItemTextW(hwnd, 2002, i18n::T(descKeys[sel]));
+                        return TRUE;
+                    }
+                    break;
+                }
+                case WM_CLOSE:
+                    EndDialog(hwnd, IDOK);
+                    return TRUE;
+                case WM_DESTROY: {
+                    HFONT font = static_cast<HFONT>(RemovePropW(hwnd, L"Font"));
+                    if (font) DeleteObject(font);
+                    return TRUE;
+                }
+            }
+            return FALSE;
+        }
+    };
+
+    // Build in-memory dialog template
+    std::vector<WORD> buf;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+    buf.push_back(LOWORD(style));
+    buf.push_back(HIWORD(style));
+    buf.push_back(0); buf.push_back(0);  // exstyle
+    buf.push_back(0);                     // cdit
+    buf.push_back(0); buf.push_back(0);   // x, y
+    buf.push_back(100); buf.push_back(100); // cx, cy (resized in initdialog)
+    buf.push_back(0);                     // menu
+    buf.push_back(0);                     // class
+    // Title
+    const wchar_t* title = i18n::T("tray.about");
+    while (*title) { buf.push_back(static_cast<WORD>(*title)); ++title; }
+    buf.push_back(0);
+    buf.push_back(9);                     // font size
+    const wchar_t* fn = L"Segoe UI";
+    while (*fn) { buf.push_back(static_cast<WORD>(*fn)); ++fn; }
+    buf.push_back(0);
+
+    DialogBoxIndirectParamW(inst_, reinterpret_cast<LPCDLGTEMPLATEW>(buf.data()),
+                            hwnd_, AboutState::Proc, 0);
 }
 
 void App::ClearHistory() {
     if (!util::ConfirmBox(hwnd_, i18n::T("msg.confirm_clear"))) {
         return;
     }
-    // 只删非置顶
+    // Only delete unpinned items
     std::vector<uint64_t> toRemove;
     for (const Item& item : store_.Items()) {
         if (!item.pinned) {
@@ -535,11 +744,11 @@ void App::CheckStoreSize() {
         return;
     }
     sizeWarned_ = true;
-    // 提示用户清理
+    // Prompt user for cleanup
     if (!util::ConfirmBox(hwnd_, i18n::T("msg.large_data"))) {
         return;
     }
-    // 清理超过阈值的非置顶条目
+    // Remove unpinned items exceeding threshold
     uint64_t threshold =
         static_cast<uint64_t>(cfg_.largeItemThresholdMB) * 1024ULL * 1024ULL;
     std::vector<uint64_t> toRemove;

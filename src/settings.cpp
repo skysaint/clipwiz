@@ -1,9 +1,11 @@
-// settings.cpp
+// settings.cpp — Settings dialog: single centered window with grouped sections
 #include "settings.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
+
+#include "resource.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -14,12 +16,12 @@
 
 #include "hotkey.h"
 #include "i18n.h"
+#include "log.h"
 #include "util.h"
 
 namespace settings {
 namespace {
 
-// config.ini 用 UTF-8 存储，宽窄转换
 std::string Narrow(const std::wstring& ws) {
     if (ws.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0,
@@ -38,441 +40,344 @@ std::wstring Widen(const std::string& s) {
     return ws;
 }
 
-// 控件 ID
-enum : int {
-    IDC_TAB = 500,
-    IDC_OK,
-    IDC_CANCEL,
-    // 常规页 (page 0)
-    IDC_AUTOSTART,
-    IDC_MAXHISTORY,
-    IDC_EXPIRYDAYS,
-    IDC_LANGUAGE,
-    IDC_THEME,
-    IDC_POPUPPOS,
-    IDC_FONT_BTN,
-    IDC_FONT_RESET,
-    IDC_DATADIR,
-    IDC_DATADIR_BTN,
-    // 支持类型页 (page 1)
-    IDC_TYPELIST,
-    IDC_TYPEDESC,
-    IDC_TYPES_NOTE,
-    // 快捷键页 (page 2)
-    IDC_POPUP_HK,
-    IDC_POPUP_WIN,
-    IDC_PIN_HK_BASE = 600,  // 600..609
-    IDC_PIN_WIN_BASE = 620, // 620..629
-};
+// Dialog state
+Config* g_cfg = nullptr;
+bool g_resultOk = false;
+HFONT g_font = nullptr;
+HFONT g_fontBold = nullptr;
+HWND g_settingsDlg = nullptr;
+int g_dpi = 96;
 
-struct DlgState {
-    Config* cfg = nullptr;
-    HWND hwnd = nullptr;
-    HWND tab = nullptr;
-    HFONT font = nullptr;
-    bool resultOk = false;
-    // 按页分组的控件句柄，用于 show/hide
-    std::vector<HWND> pageCtrls[3];
-};
-
-DlgState* StateOf(HWND hwnd) {
-    return reinterpret_cast<DlgState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+int Dip(int value) {
+    return MulDiv(value, g_dpi, 96);
 }
 
-void Track(DlgState* st, int page, HWND ctrl) {
-    if (ctrl) {
-        st->pageCtrls[page].push_back(ctrl);
+HWND MakeCtrl(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style,
+              int x, int y, int w, int h, int id, DWORD exStyle = 0) {
+    HWND hwnd = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_VISIBLE | style,
+                                Dip(x), Dip(y), Dip(w), Dip(h),
+                                parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                GetModuleHandleW(nullptr), nullptr);
+    if (hwnd && g_font) {
+        SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
     }
+    return hwnd;
 }
 
-HWND MkLabel(DlgState* st, int page, int x, int y, int w, int h, const wchar_t* text) {
-    HWND c = CreateWindowExW(0, L"STATIC", text, WS_CHILD | SS_LEFT, x, y, w, h, st->hwnd,
-                             nullptr, nullptr, nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
+HWND MakeLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
+    return MakeCtrl(parent, L"STATIC", text, SS_LEFT, x, y, w, h, -1);
 }
 
-HWND MkEdit(DlgState* st, int page, int id, int x, int y, int w, int h, DWORD extra) {
-    HWND c = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | extra, x, y,
-                             w, h, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                             nullptr, nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
-}
-
-HWND MkCombo(DlgState* st, int page, int id, int x, int y, int w, int h) {
-    HWND c = CreateWindowExW(0, L"COMBOBOX", L"",
-                             WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, h,
-                             st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr,
-                             nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
-}
-
-HWND MkButton(DlgState* st, int page, int id, int x, int y, int w, int h, const wchar_t* text,
-              DWORD style) {
-    HWND c = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_TABSTOP | style, x, y, w, h,
-                             st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr,
-                             nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
-}
-
-HWND MkHotkey(DlgState* st, int page, int id, int x, int y, int w, int h) {
-    HWND c = CreateWindowExW(0, HOTKEY_CLASSW, L"", WS_CHILD | WS_TABSTOP, x, y, w, h, st->hwnd,
-                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
-}
-
-HWND MkListBox(DlgState* st, int page, int id, int x, int y, int w, int h) {
-    HWND c = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                             WS_CHILD | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL, x, y, w, h, st->hwnd,
-                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-    SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, page, c);
-    return c;
-}
-
-void ShowPage(DlgState* st, int page) {
-    for (int i = 0; i < 3; ++i) {
-        for (HWND c : st->pageCtrls[i]) {
-            ShowWindow(c, i == page ? SW_SHOW : SW_HIDE);
-        }
+// Returns next Y position after group header
+int MakeGroupHeader(HWND parent, const wchar_t* text, int y) {
+    HWND label = MakeCtrl(parent, L"STATIC", text, SS_LEFT, 10, y, 460, 14, -1);
+    if (label && g_fontBold) {
+        SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(g_fontBold), FALSE);
     }
+    MakeCtrl(parent, L"STATIC", L"", SS_ETCHEDHORZ, 10, y + 16, 460, 2, -1);
+    return y + 22;
 }
 
-// ---------------- 构建各页控件 ----------------
+void PopulateControls(HWND hwnd) {
+    const Config& cfg = *g_cfg;
 
-void BuildGeneral(DlgState* st) {
-    const Config& cfg = *st->cfg;
-    int y = 40;
-    const int lx = 16, rowH = 28;
+    // Layout constants (DIP) — generous sizing for readability
+    constexpr int kLabelW = 120;
+    constexpr int kFieldX = 135;
+    constexpr int kFieldW = 160;
+    constexpr int kRowH = 28;       // Row height for General section (1.5x original)
+    constexpr int kHkRowH = 30;     // Row height for Shortcuts section (larger)
+    constexpr int kEditH = 22;      // Edit/combo/hotkey control height
+    constexpr int kBtnH = 22;       // Button height
+    constexpr int kPad = 12;
+    constexpr int kDlgW = 490;
 
-    HWND cb = MkButton(st, 0, IDC_AUTOSTART, lx, y, 200, 20, i18n::T("settings.autostart"),
-                       BS_AUTOCHECKBOX);
-    if (util::GetAutostart()) {
-        SendMessageW(cb, BM_SETCHECK, BST_CHECKED, 0);
-    }
-    y += rowH;
+    int y = kPad;
 
-    MkLabel(st, 0, lx, y + 3, 190, 20, i18n::T("settings.max_history"));
-    HWND edMax = MkEdit(st, 0, IDC_MAXHISTORY, lx + 200, y, 60, 22, ES_NUMBER | ES_AUTOHSCROLL);
-    SetWindowTextW(edMax, util::Format(L"%d", cfg.maxHistory).c_str());
-    y += rowH;
+    // ===================== Section 1: General =====================
+    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.general"), y);
 
-    MkLabel(st, 0, lx, y + 3, 190, 20, i18n::T("settings.expiry_days"));
-    HWND edExp = MkEdit(st, 0, IDC_EXPIRYDAYS, lx + 200, y, 60, 22, ES_NUMBER | ES_AUTOHSCROLL);
-    SetWindowTextW(edExp, util::Format(L"%d", cfg.expiryDays).c_str());
-    y += rowH + 6;
+    // Autostart checkbox
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.autostart"),
+             BS_AUTOCHECKBOX | WS_TABSTOP, kPad, y, 280, 16, IDC_AUTOSTART);
+    if (util::GetAutostart())
+        CheckDlgButton(hwnd, IDC_AUTOSTART, BST_CHECKED);
+    y += kRowH;
 
-    MkLabel(st, 0, lx, y + 3, 130, 20, i18n::T("settings.language"));
-    HWND cbLang = MkCombo(st, 0, IDC_LANGUAGE, lx + 140, y, 180, 120);
+    // Max saved items
+    MakeLabel(hwnd, i18n::T("settings.max_history"), kPad, y + 2, kLabelW, 16);
+    MakeCtrl(hwnd, L"EDIT", util::Format(L"%d", cfg.maxHistory).c_str(),
+             ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
+             kFieldX, y, 60, kEditH, IDC_MAXHISTORY, WS_EX_CLIENTEDGE);
+    y += kRowH;
+
+    // Expiry days
+    MakeLabel(hwnd, i18n::T("settings.expiry_days"), kPad, y + 2, kLabelW, 16);
+    MakeCtrl(hwnd, L"EDIT", util::Format(L"%d", cfg.expiryDays).c_str(),
+             ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
+             kFieldX, y, 60, kEditH, IDC_EXPIRYDAYS, WS_EX_CLIENTEDGE);
+    y += kRowH;
+
+    // Language
+    MakeLabel(hwnd, i18n::T("settings.language"), kPad, y + 2, kLabelW, 16);
+    HWND cbLang = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                           CBS_DROPDOWNLIST | WS_TABSTOP,
+                           kFieldX, y, kFieldW, 120, IDC_LANGUAGE);
+    SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.lang_auto")));
     SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
     SendMessageW(cbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"\x7B80\x4F53\x4E2D\x6587"));
-    SendMessageW(cbLang, CB_SETCURSEL, cfg.language.empty() ? 0 : 1, 0);
-    y += rowH;
+    int langSel = 0;
+    if (cfg.language == L"en") langSel = 1;
+    else if (cfg.language == L"zh-CN") langSel = 2;
+    SendMessageW(cbLang, CB_SETCURSEL, langSel, 0);
+    y += kRowH;
 
-    MkLabel(st, 0, lx, y + 3, 130, 20, i18n::T("settings.theme"));
-    HWND cbTheme = MkCombo(st, 0, IDC_THEME, lx + 140, y, 180, 120);
+    // Theme
+    MakeLabel(hwnd, i18n::T("settings.theme"), kPad, y + 2, kLabelW, 16);
+    HWND cbTheme = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                            CBS_DROPDOWNLIST | WS_TABSTOP,
+                            kFieldX, y, kFieldW, 120, IDC_THEME);
     SendMessageW(cbTheme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.theme_auto")));
     SendMessageW(cbTheme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.theme_light")));
     SendMessageW(cbTheme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.theme_dark")));
     SendMessageW(cbTheme, CB_SETCURSEL, static_cast<int>(cfg.theme), 0);
-    y += rowH;
+    y += kRowH;
 
-    MkLabel(st, 0, lx, y + 3, 130, 20, i18n::T("settings.popup_pos"));
-    HWND cbPos = MkCombo(st, 0, IDC_POPUPPOS, lx + 140, y, 180, 120);
+    // Popup position
+    MakeLabel(hwnd, i18n::T("settings.popup_pos"), kPad, y + 2, kLabelW, 16);
+    HWND cbPos = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                          CBS_DROPDOWNLIST | WS_TABSTOP,
+                          kFieldX, y, kFieldW, 120, IDC_POPUPPOS);
     SendMessageW(cbPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.pos_mouse")));
     SendMessageW(cbPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.pos_caret")));
     SendMessageW(cbPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.pos_last")));
     SendMessageW(cbPos, CB_SETCURSEL, cfg.popupPosition, 0);
-    y += rowH + 6;
+    y += kRowH;
 
-    std::wstring fontLabel = i18n::T("settings.font");
-    if (!cfg.fontName.empty()) {
-        fontLabel += util::Format(L": %s %dpt", cfg.fontName.c_str(), cfg.fontSize);
-    }
-    MkButton(st, 0, IDC_FONT_BTN, lx, y, 240, 24, fontLabel.c_str(), BS_PUSHBUTTON);
-    MkButton(st, 0, IDC_FONT_RESET, lx + 250, y, 90, 24, i18n::T("settings.font_default"),
-             BS_PUSHBUTTON);
-    y += rowH + 6;
+    // Display font
+    MakeLabel(hwnd, i18n::T("settings.font"), kPad, y + 2, kLabelW, 16);
+    std::wstring fontText = cfg.fontName.empty()
+        ? std::wstring(i18n::T("settings.font_default_val"))
+        : util::Format(L"%s  %dpt", cfg.fontName.c_str(), cfg.fontSize);
+    MakeCtrl(hwnd, L"BUTTON", fontText.c_str(),
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX, y, 140, kBtnH, IDC_FONT_BTN);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.font_default"),
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + 146, y, 100, kBtnH, IDC_FONT_RESET);
+    y += kRowH;
 
-    MkLabel(st, 0, lx, y + 3, 130, 20, i18n::T("settings.data_dir"));
-    std::wstring dirText = cfg.dataDir.empty() ? util::ExeDir() : cfg.dataDir;
-    HWND edDir = MkEdit(st, 0, IDC_DATADIR, lx + 140, y, 250, 22, ES_READONLY | ES_AUTOHSCROLL);
-    SetWindowTextW(edDir, dirText.c_str());
-    MkButton(st, 0, IDC_DATADIR_BTN, lx + 398, y, 30, 22, L"...", BS_PUSHBUTTON);
-}
+    // Data directory
+    MakeLabel(hwnd, i18n::T("settings.data_dir"), kPad, y + 2, kLabelW, 16);
+    std::wstring displayDir = cfg.dataDir.empty() ? L"." : util::MakeRelativePath(cfg.dataDir);
+    MakeCtrl(hwnd, L"EDIT", displayDir.c_str(),
+             ES_AUTOHSCROLL | ES_READONLY | WS_TABSTOP,
+             kFieldX, y, 210, kEditH, IDC_DATADIR, WS_EX_CLIENTEDGE);
+    MakeCtrl(hwnd, L"BUTTON", L"...",
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + 215, y, 26, kEditH, IDC_DATADIR_BTN);
+    y += kRowH + 8;
 
-void BuildTypes(DlgState* st) {
-    HWND list = MkListBox(st, 1, IDC_TYPELIST, 16, 40, 200, 180);
-    const char* keys[] = {"type.text.name", "type.image.name", "type.html.name", "type.rtf.name",
-                          "type.filedrop.name"};
-    for (const char* k : keys) {
-        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T(k)));
-    }
-    SendMessageW(list, LB_SETCURSEL, 0, 0);
+    // ===================== Section 2: Shortcuts =====================
+    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.shortcuts"), y);
 
-    HWND desc = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", i18n::T("type.text.desc"),
-                                WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | WS_TABSTOP,
-                                226, 40, 240, 180, st->hwnd,
-                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TYPEDESC)), nullptr,
-                                nullptr);
-    SendMessageW(desc, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-    Track(st, 1, desc);
-}
+    // Popup hotkey
+    MakeLabel(hwnd, i18n::T("settings.popup_hotkey"), kPad, y + 2, kLabelW, 16);
+    HWND hkPopup = MakeCtrl(hwnd, HOTKEY_CLASSW, L"",
+                            WS_TABSTOP,
+                            kFieldX, y, 120, kEditH, IDC_POPUP_HK, WS_EX_CLIENTEDGE);
+    SendMessageW(hkPopup, HKM_SETHOTKEY, hotkey::ToControl(cfg.popupHotkey), 0);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.win_key"),
+             BS_AUTOCHECKBOX | WS_TABSTOP, kFieldX + 126, y + 2, 60, 16, IDC_POPUP_WIN);
+    if (hotkey::ModsOf(cfg.popupHotkey) & MOD_WIN)
+        CheckDlgButton(hwnd, IDC_POPUP_WIN, BST_CHECKED);
+    y += kHkRowH + 6;
 
-void BuildShortcuts(DlgState* st) {
-    const Config& cfg = *st->cfg;
-    int y = 40;
-    const int lx = 16;
+    // Pinned item shortcuts label
+    MakeLabel(hwnd, i18n::T("settings.pinned_group"), kPad, y, 220, 16);
+    y += 20;
 
-    MkLabel(st, 2, lx, y + 3, 160, 20, i18n::T("settings.popup_hotkey"));
-    HWND hk = MkHotkey(st, 2, IDC_POPUP_HK, lx + 170, y, 130, 22);
-    SendMessageW(hk, HKM_SETHOTKEY, hotkey::ToControl(cfg.popupHotkey), 0);
-    HWND winCb = MkButton(st, 2, IDC_POPUP_WIN, lx + 310, y, 60, 22, i18n::T("settings.win_key"),
-                          BS_AUTOCHECKBOX);
-    if (hotkey::ModsOf(cfg.popupHotkey) & MOD_WIN) {
-        SendMessageW(winCb, BM_SETCHECK, BST_CHECKED, 0);
-    }
-    y += 34;
-
-    MkButton(st, 2, 0, lx, y, 450, 168, i18n::T("settings.pinned_group"), BS_GROUPBOX);
-    y += 18;
-
+    // 10 pinned hotkeys in 2 columns (5 per column)
     for (int i = 0; i < 10; ++i) {
         int col = i / 5;
         int row = i % 5;
-        int cx = lx + 14 + col * 224;
-        int cy = y + row * 28;
-        std::wstring label = util::Format(L"%s%d:", i18n::T("settings.position"), i + 1);
-        MkLabel(st, 2, cx, cy + 2, 52, 18, label.c_str());
-        HWND phk = MkHotkey(st, 2, IDC_PIN_HK_BASE + i, cx + 54, cy, 104, 20);
-        SendMessageW(phk, HKM_SETHOTKEY, hotkey::ToControl(cfg.pinnedHotkeys[i]), 0);
-        HWND pwin = MkButton(st, 2, IDC_PIN_WIN_BASE + i, cx + 164, cy, 50, 20,
-                             i18n::T("settings.win_key"), BS_AUTOCHECKBOX);
-        if (hotkey::ModsOf(cfg.pinnedHotkeys[i]) & MOD_WIN) {
-            SendMessageW(pwin, BM_SETCHECK, BST_CHECKED, 0);
-        }
+        int cx = kPad + col * 240;
+        int cy = y + row * kHkRowH;
+
+        std::wstring numLabel = util::Format(L"%d:", i + 1);
+        MakeLabel(hwnd, numLabel.c_str(), cx, cy + 2, 22, 16);
+        HWND hk = MakeCtrl(hwnd, HOTKEY_CLASSW, L"",
+                           WS_TABSTOP,
+                           cx + 25, cy, 110, kEditH, IDC_PIN_HK_BASE + i, WS_EX_CLIENTEDGE);
+        SendMessageW(hk, HKM_SETHOTKEY, hotkey::ToControl(cfg.pinnedHotkeys[i]), 0);
+        MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.win_key"),
+                 BS_AUTOCHECKBOX | WS_TABSTOP, cx + 140, cy + 2, 60, 16, IDC_PIN_WIN_BASE + i);
+        if (hotkey::ModsOf(cfg.pinnedHotkeys[i]) & MOD_WIN)
+            CheckDlgButton(hwnd, IDC_PIN_WIN_BASE + i, BST_CHECKED);
     }
+    y += 5 * kHkRowH + 10;
+
+    // ===================== Footer: OK / Cancel =====================
+    int btnW = 85;
+    int footBtnH = 26;
+    int btnY = y;
+    int btnX = (kDlgW - btnW * 2 - 12) / 2;
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.ok"),
+             BS_DEFPUSHBUTTON | WS_TABSTOP, btnX, btnY, btnW, footBtnH, IDOK);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.cancel"),
+             BS_PUSHBUTTON | WS_TABSTOP, btnX + btnW + 12, btnY, btnW, footBtnH, IDCANCEL);
+    y += footBtnH + kPad;
+
+    // Resize dialog to fit content
+    RECT rcClient = {0, 0, Dip(kDlgW), Dip(y)};
+    AdjustWindowRectEx(&rcClient, GetWindowLongW(hwnd, GWL_STYLE), FALSE,
+                       GetWindowLongW(hwnd, GWL_EXSTYLE));
+    int dlgW = rcClient.right - rcClient.left;
+    int dlgH = rcClient.bottom - rcClient.top;
+
+    // Center on screen
+    RECT workArea;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    int screenCx = workArea.left + (workArea.right - workArea.left - dlgW) / 2;
+    int screenCy = workArea.top + (workArea.bottom - workArea.top - dlgH) / 2;
+    SetWindowPos(hwnd, nullptr, screenCx, screenCy, dlgW, dlgH, SWP_NOZORDER);
 }
 
-// ---------------- 收集 ----------------
-
-void Collect(DlgState* st) {
-    Config& cfg = *st->cfg;
-    HWND h = st->hwnd;
-
-    cfg.maxHistory = GetDlgItemInt(h, IDC_MAXHISTORY, nullptr, FALSE);
-    cfg.expiryDays = GetDlgItemInt(h, IDC_EXPIRYDAYS, nullptr, FALSE);
-
-    int langSel = static_cast<int>(SendMessageW(GetDlgItem(h, IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
-    cfg.language = (langSel == 1) ? L"zh-CN" : L"";
-
-    int themeSel = static_cast<int>(SendMessageW(GetDlgItem(h, IDC_THEME), CB_GETCURSEL, 0, 0));
-    cfg.theme = static_cast<ThemeMode>(themeSel);
-
-    cfg.popupPosition = static_cast<int>(
-        SendMessageW(GetDlgItem(h, IDC_POPUPPOS), CB_GETCURSEL, 0, 0));
-
-    bool autostart = SendMessageW(GetDlgItem(h, IDC_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    util::SetAutostart(autostart);
-
-    WORD raw = static_cast<WORD>(SendMessageW(GetDlgItem(h, IDC_POPUP_HK), HKM_GETHOTKEY, 0, 0));
-    bool win = SendMessageW(GetDlgItem(h, IDC_POPUP_WIN), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    cfg.popupHotkey = hotkey::FromControl(raw, win);
-
-    for (int i = 0; i < 10; ++i) {
-        WORD r = static_cast<WORD>(
-            SendMessageW(GetDlgItem(h, IDC_PIN_HK_BASE + i), HKM_GETHOTKEY, 0, 0));
-        bool w = SendMessageW(GetDlgItem(h, IDC_PIN_WIN_BASE + i), BM_GETCHECK, 0, 0) == BST_CHECKED;
-        cfg.pinnedHotkeys[i] = hotkey::FromControl(r, w);
-    }
-}
-
-// ---------------- 字体 ----------------
-
-void DoFont(DlgState* st) {
-    Config& cfg = *st->cfg;
-    LOGFONTW lf{};
-    lf.lfCharSet = DEFAULT_CHARSET;
-    if (!cfg.fontName.empty()) {
-        wcsncpy_s(lf.lfFaceName, cfg.fontName.c_str(), _TRUNCATE);
-    }
-    if (cfg.fontSize > 0) {
-        lf.lfHeight = -MulDiv(cfg.fontSize, util::DpiOf(st->hwnd), 72);
-    }
-    CHOOSEFONTW cf{};
-    cf.lStructSize = sizeof(cf);
-    cf.hwndOwner = st->hwnd;
-    cf.lpLogFont = &lf;
-    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST;
-    if (ChooseFontW(&cf)) {
-        cfg.fontName = lf.lfFaceName;
-        cfg.fontSize = cf.iPointSize / 10;
-        std::wstring label = util::Format(L"%s: %s %dpt", i18n::T("settings.font"),
-                                          cfg.fontName.c_str(), cfg.fontSize);
-        SetWindowTextW(GetDlgItem(st->hwnd, IDC_FONT_BTN), label.c_str());
-    }
-}
-
-void DoBrowseDir(DlgState* st) {
-    wchar_t path[MAX_PATH] = {};
-    BROWSEINFOW bi{};
-    bi.hwndOwner = st->hwnd;
-    bi.pszDisplayName = path;
-    bi.lpszTitle = i18n::T("settings.data_dir");
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (pidl) {
-        if (SHGetPathFromIDListW(pidl, path)) {
-            st->cfg->dataDir = path;
-            SetWindowTextW(GetDlgItem(st->hwnd, IDC_DATADIR), path);
-        }
-        CoTaskMemFree(pidl);
-    }
-}
-
-void DoTypeDesc(DlgState* st) {
-    int sel = static_cast<int>(SendMessageW(GetDlgItem(st->hwnd, IDC_TYPELIST), LB_GETCURSEL, 0, 0));
-    const char* descKeys[] = {"type.text.desc", "type.image.desc", "type.html.desc",
-                              "type.rtf.desc", "type.filedrop.desc"};
-    if (sel >= 0 && sel < 5) {
-        SetWindowTextW(GetDlgItem(st->hwnd, IDC_TYPEDESC), i18n::T(descKeys[sel]));
-    }
-}
-
-// ---------------- WndProc ----------------
-
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    (void)lparam;
     switch (msg) {
-        case WM_CREATE: {
-            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
-            DlgState* st = reinterpret_cast<DlgState*>(cs->lpCreateParams);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
-            st->hwnd = hwnd;
-            st->font = util::CreateUiFont(util::DpiOf(hwnd), 0);
-
-            SetWindowTextW(hwnd, i18n::T("settings.title"));
-
-            st->tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                      8, 6, 480, 256, hwnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TAB)),
-                                      nullptr, nullptr);
-            SendMessageW(st->tab, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-            TCITEMW ti{};
-            ti.mask = TCIF_TEXT;
-            ti.pszText = const_cast<LPWSTR>(i18n::T("settings.tab.general"));
-            TabCtrl_InsertItem(st->tab, 0, &ti);
-            ti.pszText = const_cast<LPWSTR>(i18n::T("settings.tab.types"));
-            TabCtrl_InsertItem(st->tab, 1, &ti);
-            ti.pszText = const_cast<LPWSTR>(i18n::T("settings.tab.shortcuts"));
-            TabCtrl_InsertItem(st->tab, 2, &ti);
-
-            BuildGeneral(st);
-            BuildTypes(st);
-            BuildShortcuts(st);
-            ShowPage(st, 0);
-
-            // OK / Cancel（始终可见，不属于任何页）
-            HWND ok = CreateWindowExW(0, L"BUTTON", i18n::T("settings.ok"),
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 310,
-                                      268, 80, 26, hwnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_OK)), nullptr,
-                                      nullptr);
-            SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-            HWND cancel = CreateWindowExW(0, L"BUTTON", i18n::T("settings.cancel"),
-                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 398,
-                                          268, 80, 26, hwnd,
-                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CANCEL)),
-                                          nullptr, nullptr);
-            SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
-            return 0;
-        }
+        case WM_INITDIALOG:
+            g_settingsDlg = hwnd;
+            PopulateControls(hwnd);
+            return TRUE;
         case WM_COMMAND: {
-            DlgState* st = StateOf(hwnd);
-            if (!st) {
-                break;
-            }
             int id = LOWORD(wparam);
-            int code = HIWORD(wparam);
-            if (id == IDC_OK) {
-                Collect(st);
-                st->resultOk = true;
-                DestroyWindow(hwnd);
-                return 0;
+            if (id == IDOK) {
+                Config& cfg = *g_cfg;
+                cfg.maxHistory = GetDlgItemInt(hwnd, IDC_MAXHISTORY, nullptr, FALSE);
+                cfg.expiryDays = GetDlgItemInt(hwnd, IDC_EXPIRYDAYS, nullptr, FALSE);
+                int langSel = static_cast<int>(
+                    SendMessageW(GetDlgItem(hwnd, IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
+                if (langSel == 1) cfg.language = L"en";
+                else if (langSel == 2) cfg.language = L"zh-CN";
+                else cfg.language = L"";
+                cfg.theme = static_cast<ThemeMode>(
+                    SendMessageW(GetDlgItem(hwnd, IDC_THEME), CB_GETCURSEL, 0, 0));
+                cfg.popupPosition = static_cast<int>(
+                    SendMessageW(GetDlgItem(hwnd, IDC_POPUPPOS), CB_GETCURSEL, 0, 0));
+                bool autostart = IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED;
+                util::SetAutostart(autostart);
+                // Shortcuts
+                WORD raw = static_cast<WORD>(
+                    SendDlgItemMessageW(hwnd, IDC_POPUP_HK, HKM_GETHOTKEY, 0, 0));
+                bool win = IsDlgButtonChecked(hwnd, IDC_POPUP_WIN) == BST_CHECKED;
+                cfg.popupHotkey = hotkey::FromControl(raw, win);
+                for (int i = 0; i < 10; ++i) {
+                    WORD r = static_cast<WORD>(
+                        SendDlgItemMessageW(hwnd, IDC_PIN_HK_BASE + i, HKM_GETHOTKEY, 0, 0));
+                    bool w = IsDlgButtonChecked(hwnd, IDC_PIN_WIN_BASE + i) == BST_CHECKED;
+                    cfg.pinnedHotkeys[i] = hotkey::FromControl(r, w);
+                }
+                g_resultOk = true;
+                EndDialog(hwnd, IDOK);
+                return TRUE;
             }
-            if (id == IDC_CANCEL) {
-                st->resultOk = false;
-                DestroyWindow(hwnd);
-                return 0;
+            if (id == IDCANCEL) {
+                EndDialog(hwnd, IDCANCEL);
+                return TRUE;
             }
+
             if (id == IDC_FONT_BTN) {
-                DoFont(st);
-                return 0;
+                LOGFONTW lf{};
+                lf.lfCharSet = DEFAULT_CHARSET;
+                if (!g_cfg->fontName.empty())
+                    wcsncpy_s(lf.lfFaceName, g_cfg->fontName.c_str(), _TRUNCATE);
+                if (g_cfg->fontSize > 0)
+                    lf.lfHeight = -MulDiv(g_cfg->fontSize, g_dpi, 72);
+                CHOOSEFONTW cf{};
+                cf.lStructSize = sizeof(cf);
+                cf.hwndOwner = hwnd;
+                cf.lpLogFont = &lf;
+                cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST;
+                if (ChooseFontW(&cf)) {
+                    g_cfg->fontName = lf.lfFaceName;
+                    g_cfg->fontSize = cf.iPointSize / 10;
+                    std::wstring t = util::Format(L"%s  %dpt",
+                                                  g_cfg->fontName.c_str(), g_cfg->fontSize);
+                    SetDlgItemTextW(hwnd, IDC_FONT_BTN, t.c_str());
+                }
+                return TRUE;
             }
             if (id == IDC_FONT_RESET) {
-                st->cfg->fontName.clear();
-                st->cfg->fontSize = 0;
-                SetWindowTextW(GetDlgItem(hwnd, IDC_FONT_BTN), i18n::T("settings.font"));
-                return 0;
+                g_cfg->fontName.clear();
+                g_cfg->fontSize = 0;
+                SetDlgItemTextW(hwnd, IDC_FONT_BTN, i18n::T("settings.font_default_val"));
+                return TRUE;
             }
             if (id == IDC_DATADIR_BTN) {
-                DoBrowseDir(st);
-                return 0;
-            }
-            if (id == IDC_TYPELIST && code == LBN_SELCHANGE) {
-                DoTypeDesc(st);
-                return 0;
-            }
-            break;
-        }
-        case WM_NOTIFY: {
-            NMHDR* nm = reinterpret_cast<NMHDR*>(lparam);
-            if (nm->idFrom == IDC_TAB && nm->code == TCN_SELCHANGE) {
-                DlgState* st = StateOf(hwnd);
-                if (st) {
-                    ShowPage(st, TabCtrl_GetCurSel(st->tab));
+                wchar_t path[MAX_PATH] = {};
+                BROWSEINFOW bi{};
+                bi.hwndOwner = hwnd;
+                bi.pszDisplayName = path;
+                bi.lpszTitle = i18n::T("settings.data_dir");
+                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+                if (pidl) {
+                    if (SHGetPathFromIDListW(pidl, path)) {
+                        std::wstring sel = path;
+                        std::wstring disp = util::MakeRelativePath(sel);
+                        g_cfg->dataDir = disp;
+                        SetDlgItemTextW(hwnd, IDC_DATADIR, disp.c_str());
+                    }
+                    CoTaskMemFree(pidl);
                 }
-                return 0;
+                return TRUE;
             }
             break;
         }
-        case WM_CTLCOLORSTATIC: {
-            HDC hdc = reinterpret_cast<HDC>(wparam);
-            SetBkMode(hdc, TRANSPARENT);
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
-        }
-        case WM_CLOSE: {
-            DlgState* st = StateOf(hwnd);
-            if (st) {
-                st->resultOk = false;
-            }
-            DestroyWindow(hwnd);
-            return 0;
-        }
+        case WM_CLOSE:
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
         case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-        default:
-            break;
+            g_settingsDlg = nullptr;
+            if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+            if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = nullptr; }
+            return TRUE;
     }
-    return DefWindowProcW(hwnd, msg, wparam, lparam);
+    return FALSE;
+}
+
+// Build minimal in-memory DLGTEMPLATE (no controls, we add them in WM_INITDIALOG)
+std::vector<WORD> BuildEmptyDlgTemplate() {
+    std::vector<WORD> buf;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+    buf.push_back(LOWORD(style));
+    buf.push_back(HIWORD(style));
+    buf.push_back(0); buf.push_back(0);  // dwExtendedStyle
+    buf.push_back(0);                     // cdit = 0
+    buf.push_back(0);                     // x
+    buf.push_back(0);                     // y
+    buf.push_back(100);                   // cx (placeholder, resized in WM_INITDIALOG)
+    buf.push_back(100);                   // cy (placeholder)
+    buf.push_back(0);                     // menu = none
+    buf.push_back(0);                     // class = default
+    // Title string
+    const wchar_t* title = i18n::T("settings.title");
+    while (*title) { buf.push_back(static_cast<WORD>(*title)); ++title; }
+    buf.push_back(0);
+    // DS_SETFONT requires font info
+    buf.push_back(9);                     // point size
+    const wchar_t* fontName = L"Segoe UI";
+    while (*fontName) { buf.push_back(static_cast<WORD>(*fontName)); ++fontName; }
+    buf.push_back(0);
+    return buf;
 }
 
 }  // namespace
 
-// ------------------------------------------------------------------ 公共接口
+// ------------------------------------------------------------------ Public interface
 
 Config Defaults() {
     Config cfg;
     cfg.popupHotkey = hotkey::Make(MOD_CONTROL | MOD_ALT, 'V');
+    cfg.expiryDays = 5;
     return cfg;
 }
 
@@ -482,173 +387,130 @@ void Clamp(Config& cfg) {
     cfg.pasteDelayMs = std::clamp(cfg.pasteDelayMs, 0, 2000);
     cfg.rowsVisible = std::clamp(cfg.rowsVisible, 4, 25);
     cfg.popupPosition = std::clamp(cfg.popupPosition, 0, 2);
-    if (cfg.maxTextBytes < 1024u) {
-        cfg.maxTextBytes = 1024u;
-    }
-    if (cfg.maxTextBytes > 64u * 1024u * 1024u) {
-        cfg.maxTextBytes = 64u * 1024u * 1024u;
-    }
-    if (cfg.maxImagePixels < 65536u) {
-        cfg.maxImagePixels = 65536u;
-    }
+    if (cfg.maxTextBytes < 1024u) cfg.maxTextBytes = 1024u;
+    if (cfg.maxTextBytes > 64u * 1024u * 1024u) cfg.maxTextBytes = 64u * 1024u * 1024u;
+    if (cfg.maxImagePixels < 65536u) cfg.maxImagePixels = 65536u;
     cfg.largeItemThresholdMB = std::clamp(cfg.largeItemThresholdMB, 1, 500);
 }
 
 void Load(Config& cfg) {
     cfg = Defaults();
     std::vector<uint8_t> raw;
-    if (!util::ReadWholeFile(util::ConfigPath(), raw)) {
-        return;
-    }
+    if (!util::ReadWholeFile(util::ConfigPath(), raw)) return;
     size_t start = 0;
-    if (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) {
-        start = 3;
-    }
+    if (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) start = 3;
     std::string content(reinterpret_cast<const char*>(raw.data()) + start, raw.size() - start);
 
     auto getStr = [&](const char* key) -> std::string {
         std::string needle = std::string(key) + "=";
         size_t pos = content.find(needle);
-        if (pos == std::string::npos) {
-            return {};
-        }
+        if (pos == std::string::npos) return {};
         pos += needle.size();
         size_t eol = content.find('\n', pos);
-        std::string val =
-            content.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
-        while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) {
-            val.pop_back();
-        }
+        std::string val = content.substr(pos, eol == std::string::npos
+                                         ? std::string::npos : eol - pos);
+        while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
         return val;
     };
     auto getInt = [&](const char* key, int def) -> int {
         std::string s = getStr(key);
-        return s.empty() ? def : atoi(s.c_str());
-    };
-    auto getU32 = [&](const char* key, uint32_t def) -> uint32_t {
-        std::string s = getStr(key);
-        return s.empty() ? def : static_cast<uint32_t>(strtoul(s.c_str(), nullptr, 10));
+        return s.empty() ? def : std::atoi(s.c_str());
     };
 
     cfg.maxHistory = getInt("MaxHistory", cfg.maxHistory);
     cfg.expiryDays = getInt("ExpiryDays", cfg.expiryDays);
     cfg.pasteDelayMs = getInt("PasteDelayMs", cfg.pasteDelayMs);
     cfg.rowsVisible = getInt("RowsVisible", cfg.rowsVisible);
+    cfg.popupPosition = getInt("PopupPosition", cfg.popupPosition);
     cfg.theme = static_cast<ThemeMode>(getInt("Theme", 0));
-    cfg.popupPosition = getInt("PopupPosition", 0);
+    cfg.maxTextBytes = static_cast<uint32_t>(
+        getInt("MaxTextBytes", static_cast<int>(cfg.maxTextBytes)));
+    cfg.maxImagePixels = static_cast<uint32_t>(
+        getInt("MaxImagePixels", static_cast<int>(cfg.maxImagePixels)));
+    cfg.largeItemThresholdMB = getInt("LargeItemThresholdMB", cfg.largeItemThresholdMB);
     cfg.lastPopupX = getInt("LastPopupX", -1);
     cfg.lastPopupY = getInt("LastPopupY", -1);
-    cfg.fontSize = getInt("FontSize", 0);
-    cfg.maxTextBytes = getU32("MaxTextBytes", cfg.maxTextBytes);
-    cfg.maxImagePixels = getU32("MaxImagePixels", cfg.maxImagePixels);
-    cfg.largeItemThresholdMB = getInt("LargeItemThresholdMB", cfg.largeItemThresholdMB);
-
+    cfg.language = Widen(getStr("Language"));
     std::string hk = getStr("PopupHotkey");
-    if (!hk.empty()) {
-        cfg.popupHotkey = hotkey::FromText(Widen(hk));
-    }
+    if (!hk.empty())
+        cfg.popupHotkey = static_cast<uint32_t>(std::strtoul(hk.c_str(), nullptr, 10));
     for (int i = 0; i < 10; ++i) {
         char key[32];
-        sprintf_s(key, "PinnedHotkey%d", i + 1);
-        std::string s = getStr(key);
-        if (!s.empty()) {
-            cfg.pinnedHotkeys[i] = hotkey::FromText(Widen(s));
-        }
+        std::snprintf(key, sizeof(key), "PinnedHotkey%d", i);
+        std::string v = getStr(key);
+        if (!v.empty())
+            cfg.pinnedHotkeys[i] = static_cast<uint32_t>(std::strtoul(v.c_str(), nullptr, 10));
     }
-    std::string lang = getStr("Language");
-    if (!lang.empty()) {
-        cfg.language = Widen(lang);
-    }
-    std::string dir = getStr("DataDir");
-    if (!dir.empty()) {
-        cfg.dataDir = Widen(dir);
-    }
-    std::string font = getStr("FontName");
-    if (!font.empty()) {
-        cfg.fontName = Widen(font);
-    }
-    Clamp(cfg);
+    cfg.dataDir = Widen(getStr("DataDir"));
+    cfg.fontName = Widen(getStr("FontName"));
+    cfg.fontSize = getInt("FontSize", 0);
 }
 
 bool Save(const Config& cfg) {
     std::string ini;
-    ini += "# ClipWiz config\n";
     ini += "MaxHistory=" + std::to_string(cfg.maxHistory) + "\n";
     ini += "ExpiryDays=" + std::to_string(cfg.expiryDays) + "\n";
     ini += "PasteDelayMs=" + std::to_string(cfg.pasteDelayMs) + "\n";
     ini += "RowsVisible=" + std::to_string(cfg.rowsVisible) + "\n";
-    ini += "Theme=" + std::to_string(static_cast<int>(cfg.theme)) + "\n";
     ini += "PopupPosition=" + std::to_string(cfg.popupPosition) + "\n";
-    ini += "LastPopupX=" + std::to_string(cfg.lastPopupX) + "\n";
-    ini += "LastPopupY=" + std::to_string(cfg.lastPopupY) + "\n";
-    ini += "FontSize=" + std::to_string(cfg.fontSize) + "\n";
+    ini += "Theme=" + std::to_string(static_cast<int>(cfg.theme)) + "\n";
     ini += "MaxTextBytes=" + std::to_string(cfg.maxTextBytes) + "\n";
     ini += "MaxImagePixels=" + std::to_string(cfg.maxImagePixels) + "\n";
     ini += "LargeItemThresholdMB=" + std::to_string(cfg.largeItemThresholdMB) + "\n";
-
-    std::wstring hkText = hotkey::ToText(cfg.popupHotkey);
-    ini += "PopupHotkey=" + Narrow(hkText) + "\n";
+    ini += "LastPopupX=" + std::to_string(cfg.lastPopupX) + "\n";
+    ini += "LastPopupY=" + std::to_string(cfg.lastPopupY) + "\n";
+    ini += "PopupHotkey=" + std::to_string(cfg.popupHotkey) + "\n";
     for (int i = 0; i < 10; ++i) {
-        if (cfg.pinnedHotkeys[i] != 0) {
-            std::wstring t = hotkey::ToText(cfg.pinnedHotkeys[i]);
-            ini += "PinnedHotkey" + std::to_string(i + 1) + "=" + Narrow(t) + "\n";
-        }
+        if (cfg.pinnedHotkeys[i] != 0)
+            ini += "PinnedHotkey" + std::to_string(i) + "="
+                 + std::to_string(cfg.pinnedHotkeys[i]) + "\n";
     }
-    if (!cfg.language.empty()) {
-        ini += "Language=" + Narrow(cfg.language) + "\n";
-    }
-    if (!cfg.dataDir.empty()) {
-        ini += "DataDir=" + Narrow(cfg.dataDir) + "\n";
-    }
-    if (!cfg.fontName.empty()) {
-        ini += "FontName=" + Narrow(cfg.fontName) + "\n";
-    }
+    if (!cfg.language.empty()) ini += "Language=" + Narrow(cfg.language) + "\n";
+    if (!cfg.dataDir.empty()) ini += "DataDir=" + Narrow(cfg.dataDir) + "\n";
+    if (cfg.fontSize > 0) ini += "FontSize=" + std::to_string(cfg.fontSize) + "\n";
+    if (!cfg.fontName.empty()) ini += "FontName=" + Narrow(cfg.fontName) + "\n";
     return util::WriteFileAtomic(util::ConfigPath(), ini.data(), ini.size());
 }
 
+bool ActivateExisting() {
+    if (g_settingsDlg && IsWindow(g_settingsDlg)) {
+        SetForegroundWindow(g_settingsDlg);
+        return true;
+    }
+    return false;
+}
+
 bool ShowDialog(HWND owner, HINSTANCE inst, Config& cfg) {
-    const wchar_t kClass[] = L"ClipWizSettings";
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = inst;
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.lpszClassName = kClass;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassExW(&wc);
+    if (!inst) return false;
 
-    DlgState st;
-    st.cfg = &cfg;
+    g_cfg = &cfg;
+    g_resultOk = false;
+    g_dpi = owner ? util::DpiOf(owner) : util::DpiOf(nullptr);
 
-    int dpi = util::DpiOf(owner);
-    int w = util::Scale(504, dpi);
-    int h = util::Scale(310, dpi);
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
+    // Create fonts
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0,
+                               static_cast<UINT>(g_dpi));
+    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    ncm.lfMessageFont.lfWeight = FW_BOLD;
+    g_fontBold = CreateFontIndirectW(&ncm.lfMessageFont);
 
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, L"", WS_POPUP | WS_CAPTION |
-                                WS_SYSMENU, (sw - w) / 2, (sh - h) / 2, w, h, owner, nullptr,
-                                inst, &st);
-    if (!hwnd) {
-        UnregisterClassW(kClass, inst);
-        return false;
-    }
+    // Build in-memory dialog template
+    std::vector<WORD> tmpl = BuildEmptyDlgTemplate();
 
-    EnableWindow(owner, FALSE);
-    ShowWindow(hwnd, SW_SHOW);
+    INT_PTR ret = DialogBoxIndirectParamW(
+        inst,
+        reinterpret_cast<LPCDLGTEMPLATEW>(tmpl.data()),
+        owner,
+        SettingsDlgProc,
+        0);
 
-    MSG msgLoop{};
-    while (GetMessageW(&msgLoop, nullptr, 0, 0)) {
-        if (!IsDialogMessageW(hwnd, &msgLoop)) {
-            TranslateMessage(&msgLoop);
-            DispatchMessageW(&msgLoop);
-        }
-    }
+    // Clean up fonts if dialog proc didn't (e.g. if dialog creation failed)
+    if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+    if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = nullptr; }
 
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
-    UnregisterClassW(kClass, inst);
-    return st.resultOk;
+    return ret == IDOK && g_resultOk;
 }
 
 }  // namespace settings

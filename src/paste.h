@@ -1,20 +1,21 @@
-// paste.h — 记住"刚才在哪个窗口打字"，粘贴时把内容送回那里
+// paste.h — Remember "which window was typing in", paste content back there
 #pragma once
 
 #include <windows.h>
 
 namespace paste {
 
-// 装前台窗口变化钩子；失败也不影响主流程，只是粘贴目标会退化成当前前台窗口
+// Install foreground window change hook; failure doesn't break main flow,
+// paste target just degrades to current foreground window
 bool InstallHook();
 void RemoveHook();
 
-// 最近一个不属于本程序的前台窗口
+// Most recent foreground window not belonging to this process
 HWND Target();
-// 弹出快速粘贴框之前手动记一次，兜住钩子装不上的情况
+// Manually capture before showing quick paste popup, covers hook install failure
 void CaptureCurrentForeground();
 
-// 激活目标窗口后模拟一次 Ctrl+V。剪贴板内容需要调用方先写好。
+// Activate target window then simulate Ctrl+V. Clipboard content must be set by caller.
 bool Execute(int delayMs);
 
 }  // namespace paste

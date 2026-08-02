@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include "i18n.h"
+#include "log.h"
 #include "resource.h"
 #include "util.h"
 
@@ -16,18 +17,41 @@ bool g_added = false;
 }  // namespace
 
 bool Add(HWND owner, UINT callbackMsg, UINT iconId) {
-    g_icon = NOTIFYICONDATAW{};
-    g_icon.cbSize = sizeof(g_icon);
+    LOG_INFO("Adding tray icon, owner=%p, callbackMsg=%u, iconId=%u", owner, callbackMsg, iconId);
+    
+    // Zero out and set basic parameters
+    ZeroMemory(&g_icon, sizeof(g_icon));
+    g_icon.cbSize = sizeof(NOTIFYICONDATAW);
     g_icon.hWnd = owner;
     g_icon.uID = iconId;
     g_icon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_icon.uCallbackMessage = callbackMsg;
-    g_icon.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
-                                                 MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
-                                                 GetSystemMetrics(SM_CXSMICON),
-                                                 GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    
+    // Load icon
+    g_icon.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(iconId));
+    
+    if (!g_icon.hIcon) {
+        LOG_ERROR("Failed to load icon resource ID=%u, error=%u", iconId, GetLastError());
+        return false;
+    }
+    
+    LOG_INFO("Icon loaded successfully");
+    
+    // Set tooltip text
     wcscpy_s(g_icon.szTip, L"ClipWiz");
+    
+    // Add tray icon
     g_added = Shell_NotifyIconW(NIM_ADD, &g_icon) != FALSE;
+    
+    if (!g_added) {
+        DWORD error = GetLastError();
+        LOG_ERROR("Shell_NotifyIconW(NIM_ADD) failed, error=%u", error);
+        DestroyIcon(g_icon.hIcon);
+        g_icon.hIcon = nullptr;
+    } else {
+        LOG_INFO("Tray icon added successfully");
+    }
+    
     return g_added;
 }
 
@@ -76,13 +100,16 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
             AppendMenuW(menu, MF_STRING, CmdPinnedBase + index, label.c_str());
             ++index;
             if (index >= 20) {
-                break;  // 托盘菜单不适合太长，多的去快速粘贴框里找
+                break;  // Tray menu shouldn't be too long, find more in quick paste dialog
             }
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
 
-    AppendMenuW(menu, MF_STRING, CmdShowPopup, i18n::T("tray.show_popup"));
+    // Show quick paste dialog (with hotkey display)
+    std::wstring showPopupText = i18n::T("tray.show_popup");
+    showPopupText += L"\tCtrl+Alt+V";
+    AppendMenuW(menu, MF_STRING, CmdShowPopup, showPopupText.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CmdSettings, i18n::T("tray.settings"));
     AppendMenuW(menu, MF_STRING | (autostartOn ? MF_CHECKED : MF_UNCHECKED), CmdAutostart,
@@ -92,8 +119,8 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
     AppendMenuW(menu, MF_STRING, CmdAbout, i18n::T("tray.about"));
     AppendMenuW(menu, MF_STRING, CmdExit, i18n::T("tray.exit"));
 
-    // 托盘菜单要求所在窗口是前台窗口，否则点别处菜单不消失
-    SetForegroundWindow(owner);
+    // No longer force SetForegroundWindow to avoid other app flickering
+    // If menu doesn't disappear issue reappears, consider other solutions
     POINT pt = {};
     GetCursorPos(&pt);
     const UINT flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY |
@@ -102,7 +129,7 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
                                              : TPM_LEFTALIGN);
     const int chosen = TrackPopupMenuEx(menu, flags, pt.x, pt.y, owner, nullptr);
     DestroyMenu(menu);
-    PostMessageW(owner, WM_NULL, 0, 0);  // 老问题：菜单关掉后补一条空消息才不卡
+    PostMessageW(owner, WM_NULL, 0, 0);  // Old issue: add empty message after menu close to avoid hanging
     return chosen > 0 ? static_cast<UINT>(chosen) : 0u;
 }
 

@@ -1,4 +1,4 @@
-// app.h — 程序主体：隐藏主窗口 + 消息分发 + 各模块的粘合
+// app.h — Application core: hidden main window + message dispatch + module glue
 #pragma once
 
 #include <windows.h>
@@ -53,6 +53,14 @@ private:
     void ShowAbout();
     void ClearHistory();
 
+    // Save state machine
+    enum class SaveState {
+        NoSaveNeeded,       // No save needed (data is up to date)
+        PendingSave,        // New data pending save, write not yet started
+        SavingInProgress    // Async save in progress
+    };
+    SaveState saveState_ = SaveState::NoSaveNeeded;
+
     HINSTANCE inst_ = nullptr;
     HWND hwnd_ = nullptr;
     Store store_;
@@ -60,7 +68,6 @@ private:
     hotkey::Manager hotkeys_;
     util::Theme theme_ = {};
     AsyncWriter writer_;
-    bool savePending_ = false;
     bool settingsOpen_ = false;
     bool sizeWarned_ = false;
     std::wstring hotkeyFailures_;

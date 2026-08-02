@@ -1,7 +1,7 @@
-// hotkey.h — 全局快捷键的编码、显示文本和注册管理
+// hotkey.h — Global hotkey encoding, display text, and registration management
 //
-// 快捷键统一用一个 uint32_t 表示：高 16 位是 RegisterHotKey 的 MOD_* 组合，
-// 低 16 位是虚拟键码。0 表示未绑定。
+// Hotkeys are represented as a single uint32_t: high 16 bits = RegisterHotKey MOD_* flags,
+// low 16 bits = virtual key code. 0 means unbound.
 #pragma once
 
 #include <windows.h>
@@ -12,7 +12,7 @@
 
 namespace hotkey {
 
-// 唤出快速粘贴框固定用 1 号，置顶项从 1000 开始按序号往后排
+// Popup uses fixed ID 1; pinned items start at 1000, sequential
 constexpr int kIdPopup = 1;
 constexpr int kIdItemBase = 1000;
 
@@ -26,26 +26,26 @@ inline uint32_t VkOf(uint32_t code) {
     return code & 0xFFFFu;
 }
 
-// 给人看的写法，例如 "Ctrl+Alt+V"；未绑定时返回空串
+// Human-readable form, e.g. "Ctrl+Alt+V"; returns empty string if unbound
 std::wstring ToText(uint32_t code);
-// ToText 的逆运算，config.ini 里存的就是这种文本；解析失败返回 0
+// Inverse of ToText; config.ini stores this text format; returns 0 on parse failure
 uint32_t FromText(const std::wstring& text);
 
-// msctls_hotkey32 控件用的是 HOTKEYF_*，和 MOD_* 不是一套值，得转一道。
-// Win 键控件表示不了，单独用一个复选框传进来。
+// msctls_hotkey32 control uses HOTKEYF_* flags which differ from MOD_*, conversion needed.
+// Win key cannot be represented by the control, passed separately via a checkbox.
 uint32_t FromControl(WORD raw, bool win);
 WORD ToControl(uint32_t code);
 
-// 至少要带一个修饰键，否则会把普通打字全吞掉
+// At least one modifier key required, otherwise it would intercept normal typing
 bool IsUsable(uint32_t code);
-// 那些大概率被别的程序占着的组合，提前提醒一句
+// Combinations likely occupied by other programs; warn early
 bool LooksRisky(uint32_t code, std::wstring& why);
 
 class Manager {
 public:
     void Attach(HWND hwnd) { hwnd_ = hwnd; }
 
-    // 注册失败返回 false（通常是被别的程序抢先占了）
+    // Returns false on registration failure (usually another program holds it)
     bool Register(int id, uint32_t code);
     void Unregister(int id);
     void UnregisterAll();

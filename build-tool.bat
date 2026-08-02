@@ -112,6 +112,11 @@ if !ERRORLEVEL! neq 0 (
 )
 echo.
 echo  [Build] Done. Output: build\Release\clipwiz.exe
+echo.
+echo  [Deploy] Copying lang\ to build\Release\ ...
+if not exist build\Release\lang mkdir build\Release\lang
+xcopy /Y /Q lang\*.lng build\Release\lang\ >nul
+echo  [Deploy] Done. build\Release\ is ready to use.
 if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
 pause
 goto :MENU_START
@@ -180,6 +185,11 @@ if !ERRORLEVEL! neq 0 (
 )
 echo.
 echo  [Rebuild] Done. Output: build\Release\clipwiz.exe
+echo.
+echo  [Deploy] Copying lang\ to build\Release\ ...
+if not exist build\Release\lang mkdir build\Release\lang
+xcopy /Y /Q lang\*.lng build\Release\lang\ >nul
+echo  [Deploy] Done. build\Release\ is ready to use.
 if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
 pause
 goto :MENU_START

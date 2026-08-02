@@ -39,7 +39,7 @@ struct State {
     HBRUSH editBg = nullptr;
     int dpi = 96;
 
-    // 度量（像素）
+    // Metrics (pixels)
     int width = 0;
     int titleH = 0;
     int pad = 0;
@@ -49,27 +49,22 @@ struct State {
     int indexW = 0;
     int thumbW = 0;
     int hotkeyW = 0;
-    int pinW = 0;  // 图钉预留宽
+    int pinW = 0;  // Pin icon reserved width
 
     std::vector<Row> rows;
     int sel = -1;
     int top = 0;
     int modalDepth = 0;
 
-    // 缩略图缓存
+    // Thumbnail cache
     std::vector<std::pair<uint64_t, Thumb>> thumbs;
 
-    // 拖动
-    bool dragging = false;
-    POINT dragStart = {};
-    RECT dragWinStart = {};
-
-    // 置顶排序拖拽
+    // Pinned item drag reorder
     bool reorderDrag = false;
     int reorderFrom = -1;
     int reorderInsert = -1;
 
-    // Ctrl+悬停预览
+    // Ctrl+hover preview
     HWND previewWnd = nullptr;
     int previewRow = -1;
     UINT_PTR previewTimer = 0;
@@ -77,7 +72,7 @@ struct State {
 
 State g;
 
-// ---------------- 度量 ----------------
+// ---------------- Metrics ----------------
 
 void CalcMetrics() {
     g.dpi = util::DpiOf(g.hwnd);
@@ -107,7 +102,7 @@ RECT ListRect() {
     return r;
 }
 
-// ---------------- 缩略图 ----------------
+// ---------------- Thumbnails ----------------
 
 const Thumb* GetThumb(uint64_t id) {
     for (auto& [tid, t] : g.thumbs) {
@@ -135,7 +130,7 @@ const Thumb* GetThumb(uint64_t id) {
     return &g.thumbs.back().second;
 }
 
-// ---------------- 重建列表 ----------------
+// ---------------- Rebuild list ----------------
 
 void Rebuild() {
     std::wstring filter;
@@ -148,7 +143,7 @@ void Rebuild() {
             filter = buf;
         }
     }
-    // 转小写
+    // Convert to lowercase
     for (wchar_t& c : filter) {
         c = static_cast<wchar_t>(towlower(c));
     }
@@ -207,7 +202,7 @@ void EnsureVisible() {
     }
 }
 
-// ---------------- 绘制 ----------------
+// ---------------- Drawing ----------------
 
 void DrawPinIcon(HDC dc, int x, int cy, int size, COLORREF color) {
     HPEN pen = CreatePen(PS_SOLID, std::max(1, size / 6), color);
@@ -239,14 +234,14 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     DeleteObject(back);
     SetBkMode(dc, TRANSPARENT);
 
-    // 图钉区（所有行统一宽度）
+    // Pin area (uniform width for all rows)
     int pinSize = util::Scale(9, g.dpi);
     if (row.pinned) {
         COLORREF pinColor = selected ? theme.selFg : theme.accent;
         DrawPinIcon(dc, rc.left + 2, rc.top + g.rowH / 2, pinSize, pinColor);
     }
 
-    // 统一编号（置顶 + 非置顶连续）
+    // Unified index (pinned + unpinned continuous)
     std::wstring indexText;
     if (index < 9) {
         indexText = util::Format(L"%d", index + 1);
@@ -259,7 +254,7 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     DrawTextW(dc, indexText.c_str(), -1, &indexRc,
               DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
 
-    // 文本区
+    // Text area
     RECT textRc = rc;
     textRc.left = indexRc.right + g.pad / 2;
     textRc.right = rc.right - g.hotkeyW - g.pad / 2;
@@ -287,11 +282,11 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     DrawTextW(dc, item->preview.c_str(), -1, &textRc,
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-    // 位置式快捷键提示（仅置顶区前 10 条）
+    // Positional hotkey hint (only first 10 pinned items)
     if (row.pinned) {
-        int pinnedIdx = index;  // 置顶区从 0 开始
+        int pinnedIdx = index;  // Pinned section starts from 0
         if (pinnedIdx < 10) {
-            // 从 host 获取快捷键文本（通过 config）——简化：不画了，由托盘菜单显示
+            // Get hotkey text from host (via config) — simplified: not drawn, shown in tray menu
         }
     }
 }
@@ -299,17 +294,17 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
 void PaintAll(HDC target, const RECT& client) {
     const util::Theme& theme = g.host->GetTheme();
 
-    // 双缓冲
+    // Double buffering
     HDC mem = CreateCompatibleDC(target);
     HBITMAP bmp = CreateCompatibleBitmap(target, client.right, client.bottom);
     HGDIOBJ oldBmp = SelectObject(mem, bmp);
 
-    // 背景
+    // Background
     HBRUSH bgBrush = CreateSolidBrush(theme.bg);
     FillRect(mem, &client, bgBrush);
     DeleteObject(bgBrush);
 
-    // 标题栏
+    // Title bar
     RECT titleRc = {0, 0, client.right, g.titleH};
     HBRUSH titleBrush = CreateSolidBrush(theme.bgAlt);
     FillRect(mem, &titleRc, titleBrush);
@@ -319,7 +314,7 @@ void PaintAll(HDC target, const RECT& client) {
     SetTextColor(mem, theme.fg);
     RECT titleText = {g.pad, 0, client.right - g.titleH, g.titleH};
     DrawTextW(mem, i18n::T("popup.title"), -1, &titleText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    // X 按钮
+    // X button
     int xSize = util::Scale(12, g.dpi);
     int xPad = (g.titleH - xSize) / 2;
     HPEN xPen = CreatePen(PS_SOLID, util::Scale(1, g.dpi), theme.dim);
@@ -332,7 +327,7 @@ void PaintAll(HDC target, const RECT& client) {
     SelectObject(mem, oldPen);
     DeleteObject(xPen);
 
-    // 列表
+    // List area
     RECT list = ListRect();
     int vis = g.host->RowsVisible();
     int end = std::min(g.top + vis, static_cast<int>(g.rows.size()));
@@ -345,7 +340,7 @@ void PaintAll(HDC target, const RECT& client) {
         DrawRow(mem, rowRc, i, theme);
     }
 
-    // 拖拽排序插入线
+    // Drag reorder insert line
     if (g.reorderDrag && g.reorderInsert >= 0) {
         int y = list.top + (g.reorderInsert - g.top) * g.rowH;
         HPEN linePen = CreatePen(PS_SOLID, 2, theme.accent);
@@ -356,7 +351,7 @@ void PaintAll(HDC target, const RECT& client) {
         DeleteObject(linePen);
     }
 
-    // 空态
+    // Empty state
     if (g.rows.empty()) {
         RECT emptyRc = list;
         SelectObject(mem, g.font);
@@ -365,13 +360,13 @@ void PaintAll(HDC target, const RECT& client) {
         DrawTextW(mem, msg, -1, &emptyRc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
 
-    // 底部提示
+    // Bottom hint
     RECT hintRc = {g.pad, ListBottom() + 2, client.right - g.pad, client.bottom};
     SelectObject(mem, g.fontSmall);
     SetTextColor(mem, theme.dim);
     DrawTextW(mem, i18n::T("popup.hint"), -1, &hintRc, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 
-    // 边框
+    // Border
     HPEN borderPen = CreatePen(PS_SOLID, 1, theme.line);
     HGDIOBJ op2 = SelectObject(mem, borderPen);
     HGDIOBJ ob2 = SelectObject(mem, GetStockObject(NULL_BRUSH));
@@ -386,7 +381,7 @@ void PaintAll(HDC target, const RECT& client) {
     DeleteDC(mem);
 }
 
-// ---------------- 预览浮窗 ----------------
+// ---------------- Preview tooltip window ----------------
 
 void HidePreview() {
     if (g.previewWnd) {
@@ -412,7 +407,7 @@ void ShowPreview(int rowIndex) {
     int pw = util::Scale(400, g.dpi);
     int ph = util::Scale(260, g.dpi);
 
-    // 定位在行右侧
+    // Position to the right of the row
     RECT list = ListRect();
     RECT winRc;
     GetWindowRect(g.hwnd, &winRc);
@@ -428,7 +423,7 @@ void ShowPreview(int rowIndex) {
     }
     ShowWindow(g.previewWnd, SW_SHOWNA);
 
-    // 画内容
+    // Draw content
     HDC dc = GetDC(g.previewWnd);
     RECT rc = {0, 0, pw, ph};
     HBRUSH bg = CreateSolidBrush(theme.bg);
@@ -437,7 +432,7 @@ void ShowPreview(int rowIndex) {
     SetBkMode(dc, TRANSPARENT);
 
     if (item->kind == ItemKind::Image) {
-        // 大图
+        // Large image
         int outW = 0, outH = 0;
         HBITMAP big = imagecodec::LoadThumbnailFromMemory(item->data.data(), item->data.size(),
                                                           pw - 8, ph - 8, outW, outH);
@@ -455,7 +450,7 @@ void ShowPreview(int rowIndex) {
             DeleteObject(big);
         }
     } else {
-        // 文本类：显示完整内容
+        // Text types: show full content
         std::wstring text = Store::TextOf(*item);
         SelectObject(dc, g.font);
         SetTextColor(dc, theme.fg);
@@ -466,7 +461,7 @@ void ShowPreview(int rowIndex) {
     g.previewRow = rowIndex;
 }
 
-// ---------------- 操作 ----------------
+// ---------------- Operations ----------------
 
 void Activate(int index) {
     if (index < 0 || static_cast<size_t>(index) >= g.rows.size()) {
@@ -481,7 +476,7 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
         return true;
     }
     if (ctrl && (vk == VK_UP || vk == VK_DOWN)) {
-        // 置顶排序
+        // Pinned item reorder
         if (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size() &&
             g.rows[static_cast<size_t>(g.sel)].pinned) {
             int delta = (vk == VK_UP) ? -1 : 1;
@@ -568,7 +563,7 @@ void ShowRowMenu(int index) {
     }
 }
 
-// ---------------- 定位 ----------------
+// ---------------- Positioning ----------------
 
 void PositionWindow() {
     int vis = g.host->RowsVisible();
@@ -608,7 +603,7 @@ void PositionWindow() {
             y = cur.y + 16;
         }
     }
-    // 确保在屏幕内
+    // Ensure window stays on screen
     int maxX = std::max(work.left, work.right - g.width);
     int maxY = std::max(work.top, work.bottom - h);
     x = std::clamp(x, static_cast<int>(work.left), maxX);
@@ -617,7 +612,7 @@ void PositionWindow() {
     SetWindowPos(g.hwnd, HWND_TOPMOST, x, y, g.width, h, SWP_NOACTIVATE);
 }
 
-// ---------------- Edit 子类 ----------------
+// ---------------- Edit subclass ----------------
 
 LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
@@ -633,6 +628,14 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 if (HandleNavKey(vk, ctrl, alt)) {
                     return 0;
                 }
+            }
+            break;
+        }
+        case WM_CHAR: {
+            // Suppress beep: Edit control beeps on unhandled chars like ESC and Enter
+            wchar_t ch = static_cast<wchar_t>(wparam);
+            if (ch == L'\x1B' || ch == L'\r' || ch == L'\n') {
+                return 0;
             }
             break;
         }
@@ -678,32 +681,46 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return reinterpret_cast<LRESULT>(g.editBg);
         }
+        case WM_NCHITTEST: {
+            // Let Windows handle title bar dragging natively
+            POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd, &pt);
+            if (pt.y < g.titleH) {
+                // X button area
+                int xSize = util::Scale(12, g.dpi);
+                int xPad = (g.titleH - xSize) / 2;
+                if (pt.x >= g.width - g.titleH && pt.y >= xPad && pt.y <= xPad + xSize + xPad) {
+                    return HTCLOSE;
+                }
+                return HTCAPTION;
+            }
+            return HTCLIENT;
+        }
+        case WM_NCLBUTTONDOWN: {
+            if (wparam == HTCLOSE) {
+                Hide();
+                return 0;
+            }
+            break;  // HTCAPTION: let DefWindowProc handle native dragging
+        }
+        case WM_EXITSIZEMOVE: {
+            // Remember position after drag ends
+            RECT rc;
+            GetWindowRect(hwnd, &rc);
+            g.host->SaveLastPos(rc.left, rc.top);
+            return 0;
+        }
         case WM_LBUTTONDOWN: {
             int y = GET_Y_LPARAM(lparam);
             int x = GET_X_LPARAM(lparam);
-            // 标题栏拖动
-            if (y < g.titleH) {
-                // X 按钮区域
-                int xSize = util::Scale(12, g.dpi);
-                int xPad = (g.titleH - xSize) / 2;
-                if (x >= g.width - g.titleH && y >= xPad && y <= xPad + xSize + xPad) {
-                    Hide();
-                    return 0;
-                }
-                g.dragging = true;
-                g.dragStart = {x, y};
-                GetWindowRect(hwnd, &g.dragWinStart);
-                SetCapture(hwnd);
-                return 0;
-            }
-            // 列表区点击
+            // List area click
             RECT list = ListRect();
             if (y >= list.top && y < list.bottom && x >= list.left && x < list.right) {
                 int idx = g.top + (y - list.top) / g.rowH;
                 if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
                     g.sel = idx;
                     Redraw();
-                    // 置顶区开始拖拽排序
+                    // Start drag reorder in pinned area
                     if (g.rows[static_cast<size_t>(idx)].pinned) {
                         g.reorderDrag = true;
                         g.reorderFrom = idx;
@@ -715,13 +732,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEMOVE: {
-            if (g.dragging) {
-                int dx = GET_X_LPARAM(lparam) - g.dragStart.x;
-                int dy = GET_Y_LPARAM(lparam) - g.dragStart.y;
-                SetWindowPos(hwnd, nullptr, g.dragWinStart.left + dx, g.dragWinStart.top + dy, 0, 0,
-                             SWP_NOSIZE | SWP_NOZORDER);
-                return 0;
-            }
             if (g.reorderDrag) {
                 RECT list = ListRect();
                 int y = GET_Y_LPARAM(lparam);
@@ -736,7 +746,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 Redraw();
                 return 0;
             }
-            // Ctrl+悬停预览
+            // Ctrl+hover preview
             if (GetKeyState(VK_CONTROL) & 0x8000) {
                 RECT list = ListRect();
                 int x = GET_X_LPARAM(lparam);
@@ -747,8 +757,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         static_cast<size_t>(idx) < g.rows.size()) {
                         HidePreview();
                         g.previewTimer = SetTimer(hwnd, 2, 300, nullptr);
-                        g.previewRow = -2;  // 标记等待中
-                        // 存一下目标行
+                        g.previewRow = -2;  // Mark as waiting
+                        // Store target row
                         SetPropW(hwnd, L"PreviewIdx", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(idx)));
                     }
                 } else {
@@ -760,15 +770,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_LBUTTONUP: {
-            if (g.dragging) {
-                g.dragging = false;
-                ReleaseCapture();
-                // 记住位置
-                RECT rc;
-                GetWindowRect(hwnd, &rc);
-                g.host->SaveLastPos(rc.left, rc.top);
-                return 0;
-            }
             if (g.reorderDrag) {
                 g.reorderDrag = false;
                 ReleaseCapture();
@@ -862,7 +863,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
 }  // namespace
 
-// ------------------------------------------------------------------ 公共接口
+// ------------------------------------------------------------------ Public interface
 
 bool Init(HINSTANCE inst, Host* host) {
     g.inst = inst;
@@ -877,7 +878,7 @@ bool Init(HINSTANCE inst, Host* host) {
     wc.lpszClassName = L"ClipWizPopup";
     RegisterClassExW(&wc);
 
-    // 预览窗口类
+    // Preview window class
     WNDCLASSEXW wc2{};
     wc2.cbSize = sizeof(wc2);
     wc2.lpfnWndProc = DefWindowProcW;
@@ -895,8 +896,9 @@ bool Init(HINSTANCE inst, Host* host) {
     g.font = util::CreateUiFont(g.dpi, 0);
     g.fontSmall = util::CreateUiFont(g.dpi, -1);
 
-    // 过滤框
-    g.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+    // Filter edit box
+    g.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                              g.pad, g.titleH + g.pad / 2, g.width - g.pad * 2, g.editH, g.hwnd,
                              nullptr, inst, nullptr);
     SendMessageW(g.edit, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
@@ -920,8 +922,19 @@ void Show() {
     PositionWindow();
     SetWindowPos(g.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     ShowWindow(g.hwnd, SW_SHOW);
+    // AttachThreadInput to avoid system beep when SetForegroundWindow fails
+    HWND fg = GetForegroundWindow();
+    DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    DWORD myThread = GetCurrentThreadId();
+    bool attached = false;
+    if (fgThread && fgThread != myThread) {
+        attached = AttachThreadInput(myThread, fgThread, TRUE) != FALSE;
+    }
     SetForegroundWindow(g.hwnd);
     SetFocus(g.edit);
+    if (attached) {
+        AttachThreadInput(myThread, fgThread, FALSE);
+    }
     Redraw();
 }
 
@@ -930,13 +943,13 @@ void Hide() {
     if (!IsWindowVisible(g.hwnd)) {
         return;
     }
-    // 记住位置
+    // Remember position
     RECT rc;
     GetWindowRect(g.hwnd, &rc);
     g.host->SaveLastPos(rc.left, rc.top);
     ShowWindow(g.hwnd, SW_HIDE);
     SetWindowTextW(g.edit, L"");
-    // 焦点还给之前的前台窗口
+    // Return focus to the previous foreground window
     HWND target = paste::Target();
     if (target) {
         SetForegroundWindow(target);
@@ -966,6 +979,11 @@ void OnThemeChanged() {
     if (g.editBg) {
         DeleteObject(g.editBg);
         g.editBg = nullptr;
+    }
+    // Refresh cue banner text (language may have changed)
+    if (g.edit) {
+        SendMessageW(g.edit, EM_SETCUEBANNER, TRUE,
+                     reinterpret_cast<LPARAM>(i18n::T("popup.filter_hint")));
     }
     Redraw();
 }

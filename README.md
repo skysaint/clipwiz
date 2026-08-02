@@ -1,6 +1,6 @@
 # ClipWiz
 
-A lightweight Windows clipboard manager. Single executable, zero dependencies, < 8MB resident memory.
+A lightweight Windows clipboard history tool. Single executable, zero dependencies, < 8MB resident memory.
 
 ---
 

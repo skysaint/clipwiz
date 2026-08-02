@@ -9,7 +9,7 @@ namespace {
 HWINEVENTHOOK g_hook = nullptr;
 HWND g_target = nullptr;
 
-// 桌面、任务栏、开始菜单这些不是能粘贴的地方，记下来只会干扰
+// Desktop, taskbar, start menu are not valid paste targets; recording them would interfere
 bool IsShellWindow(HWND hwnd) {
     static const wchar_t* kSkip[] = {
         L"Shell_TrayWnd",
@@ -66,8 +66,8 @@ void CALLBACK ForegroundProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG ob
     }
 }
 
-// SetForegroundWindow 在不是当前前台进程时会被系统拒掉，
-// 借目标窗口线程的输入队列绕过这个限制。
+// SetForegroundWindow gets rejected when we're not the foreground process;
+// attach to target's thread input queue to bypass this limitation.
 bool ForceForeground(HWND hwnd) {
     if (GetForegroundWindow() == hwnd) {
         return true;
@@ -102,8 +102,8 @@ void SendKey(WORD vk, bool down) {
     SendInput(1, &input, sizeof(input));
 }
 
-// 快捷键是按住修饰键触发的，此刻 Ctrl/Alt/Shift/Win 物理上还按着。
-// 不先松开，接下来的 Ctrl+V 会变成 Ctrl+Alt+V 之类的东西。
+// Hotkey is triggered with modifier keys held; Ctrl/Alt/Shift/Win are still physically down.
+// Must release them first, otherwise Ctrl+V would become Ctrl+Alt+V or similar.
 void ReleaseHeldModifiers() {
     static const WORD kMods[] = {VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU,
                                  VK_LSHIFT,   VK_RSHIFT,   VK_LWIN,  VK_RWIN};
@@ -155,7 +155,7 @@ bool Execute(int delayMs) {
     }
     ForceForeground(target);
     if (delayMs > 0) {
-        Sleep(static_cast<DWORD>(delayMs));  // 等目标窗口把焦点接稳
+        Sleep(static_cast<DWORD>(delayMs));  // Wait for target window to stabilize focus
     }
     ReleaseHeldModifiers();
 

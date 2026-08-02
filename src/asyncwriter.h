@@ -1,10 +1,10 @@
-// asyncwriter.h — 后台文件写入
+// asyncwriter.h — Background file writing
 //
-// 保证：
-//   1. 写盘在独立线程，不阻塞 UI
-//   2. 同一时刻最多一个写操作在执行
-//   3. 前一个没写完时新的请求排队（只保留最新一份，旧的被覆盖）
-//   4. 线程安全：Submit 从主线程调，Done 从主线程调
+// Guarantees:
+//   1. Disk writes run on a dedicated thread, never blocking the UI
+//   2. At most one write operation executes at any time
+//   3. New submissions replace queued (not-yet-started) data (only latest kept)
+//   4. Thread-safe: Submit called from main thread, Done called from main thread
 #pragma once
 
 #include <windows.h>
@@ -25,10 +25,10 @@ public:
     bool Start();
     void Stop();
 
-    // 提交一次写任务。如果上一次还没写完，新数据会替换掉排队的旧数据。
+    // Submit a write task. If previous write hasn't started yet, new data replaces it.
     void Submit(std::wstring path, std::vector<uint8_t> data);
 
-    // 主线程调用：上一次写盘是否已完成（含从未提交过的情况）
+    // Called from main thread: whether the last write has completed (including never-submitted case)
     bool Done() const { return !busy_.load(std::memory_order_acquire); }
 
 private:

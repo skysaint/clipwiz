@@ -40,7 +40,7 @@ const std::wstring& DataDir() {
     if (!g_dataDir.empty()) {
         return g_dataDir;
     }
-    // 默认就是 exe 所在目录，绿色到极致
+    // Default is exe directory, maximally portable
     g_dataDir = ExeDir();
     return g_dataDir;
 }
@@ -162,6 +162,54 @@ std::wstring TimeStampForFileName() {
                   st.wSecond);
 }
 
+std::wstring MakeRelativePath(const std::wstring& absPath) {
+    std::wstring exeDir = ExeDir();
+    // Ensure path ends with backslash
+    if (!exeDir.empty() && exeDir.back() != L'\\') {
+        exeDir += L'\\';
+    }
+    
+    // Check if it starts with exe directory
+    if (absPath.length() >= exeDir.length() && 
+        _wcsnicmp(absPath.c_str(), exeDir.c_str(), exeDir.length()) == 0) {
+        // Replace with "."
+        std::wstring result = L".";
+        if (absPath.length() > exeDir.length()) {
+            result += absPath.substr(exeDir.length());
+        }
+        return result;
+    }
+    
+    return absPath;  // Not in exe directory, return original path
+}
+
+std::wstring MakeAbsolutePath(const std::wstring& relPath) {
+    if (relPath.empty() || relPath == L".") {
+        return ExeDir();
+    }
+    
+    // If starts with ".", replace with exe directory
+    if (relPath.length() >= 1 && relPath[0] == L'.') {
+        std::wstring exeDir = ExeDir();
+        if (!exeDir.empty() && exeDir.back() != L'\\') {
+            exeDir += L'\\';
+        }
+        
+        if (relPath.length() == 1) {
+            return exeDir;
+        }
+        
+        // Handle ".\xxx" case
+        if (relPath.length() >= 2 && relPath[1] == L'\\') {
+            return exeDir + relPath.substr(2);
+        }
+        
+        return exeDir + relPath.substr(1);
+    }
+    
+    return relPath;  // Not a relative path, return original path
+}
+
 uint64_t Hash64(const void* data, size_t size) {
     const uint8_t* p = static_cast<const uint8_t*>(data);
     uint64_t h = 1469598103934665603ULL;  // FNV-1a 64
@@ -191,7 +239,7 @@ std::wstring Format(const wchar_t* fmt, ...) {
 std::wstring OneLinePreview(const std::wstring& text, size_t maxLen) {
     std::wstring out;
     out.reserve(text.size() < maxLen ? text.size() : maxLen + 1);
-    bool lastWasSpace = true;  // 顺手吃掉开头空白
+    bool lastWasSpace = true;  // Also eat leading whitespace
     for (wchar_t ch : text) {
         wchar_t c = ch;
         if (c == L'\r' || c == L'\n' || c == L'\t' || c == 0x0b || c == 0x0c) {
@@ -235,7 +283,7 @@ Theme MakeTheme(bool dark) {
     Theme t{};
     if (dark) {
         t.bg = RGB(32, 32, 32);
-        t.bgAlt = RGB(40, 48, 62);   // 置顶区：偏蓝底色，和普通行拉开差距
+        t.bgAlt = RGB(40, 48, 62);   // Pinned area: bluish background, distinct from normal rows
         t.fg = RGB(240, 240, 240);
         t.dim = RGB(150, 150, 150);
         t.sel = RGB(0, 95, 184);
@@ -244,7 +292,7 @@ Theme MakeTheme(bool dark) {
         t.accent = RGB(120, 175, 255);
     } else {
         t.bg = RGB(252, 252, 252);
-        t.bgAlt = RGB(228, 238, 252);  // 置顶区：浅蓝底色，一眼能分出来
+        t.bgAlt = RGB(228, 238, 252);  // Pinned area: light blue background, clearly distinguishable
         t.fg = RGB(28, 28, 28);
         t.dim = RGB(120, 120, 120);
         t.sel = RGB(0, 120, 215);
@@ -277,7 +325,7 @@ HFONT CreateUiFont(int dpi, int pointDelta) {
     }
     LOGFONTW lf = ncm.lfMessageFont;
     if (pointDelta != 0) {
-        // lfHeight 是负值，往下加相当于放大
+        // lfHeight is negative, going down means increasing
         int delta = MulDiv(pointDelta, dpi, 72);
         lf.lfHeight -= delta;
     }
@@ -291,9 +339,13 @@ bool SetAutostart(bool enable) {
                         KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
         return false;
     }
-    bool ok;
+    bool ok = false;
     if (enable) {
         std::wstring cmd = L"\"" + ExePath() + L"\" --autostart";
+        if (cmd.empty() || cmd.find(L"\"") == std::wstring::npos) {
+            RegCloseKey(key);
+            return false;  // Invalid path
+        }
         ok = RegSetValueExW(key, AppName(), 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(cmd.c_str()),
                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;

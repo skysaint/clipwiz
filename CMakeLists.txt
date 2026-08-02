@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 静态链接 CRT，产物是单个 exe，拷走就能跑，不依赖 VC 运行库
+# Static link CRT: single exe, runs anywhere, no VC runtime dependency
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(clipwiz WIN32
@@ -26,10 +26,16 @@ add_executable(clipwiz WIN32
     src/util.cpp
     src/i18n.cpp
     src/asyncwriter.cpp
+    src/log.cpp
+    src/raii.h
     src/clipwiz.rc
 )
 
 target_include_directories(clipwiz PRIVATE src)
+
+# RC compiler also needs include path to find resource.h
+set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /i\"${CMAKE_CURRENT_SOURCE_DIR}/src\"")
+set_source_files_properties(src/clipwiz.rc PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 target_compile_definitions(clipwiz PRIVATE
     UNICODE
@@ -40,7 +46,7 @@ target_compile_definitions(clipwiz PRIVATE
     WINVER=0x0A00
 )
 
-# 警告当错误，构建输出必须一条警告都没有
+# Warnings as errors: build output must have zero warnings
 target_compile_options(clipwiz PRIVATE
     /W4
     /WX
@@ -52,7 +58,7 @@ target_compile_options(clipwiz PRIVATE
     /Zc:inline
 )
 
-# manifest 由 clipwiz.rc 以资源方式嵌入，禁止链接器再生成一份
+# Manifest embedded via clipwiz.rc resource; disable linker-generated manifest
 target_link_options(clipwiz PRIVATE
     /MANIFEST:NO
     $<$<NOT:$<CONFIG:Debug>>:/OPT:REF>
@@ -69,6 +75,7 @@ target_link_libraries(clipwiz PRIVATE
     advapi32
     ole32
     windowscodecs
+    comdlg32
 )
 
 set_target_properties(clipwiz PROPERTIES

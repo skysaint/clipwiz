@@ -1,21 +1,22 @@
-// i18n.h — 国际化
+// i18n.h — Internationalization
 //
-// 英文内置在代码里（不需要 .lng 文件），其他语言从 lang/<code>.lng 加载。
-// .lng 格式：UTF-8 纯文本，key=value，# 开头为注释。
+// English is built into the code (no .lng file needed); other languages loaded from lang/<code>.lng.
+// .lng format: UTF-8 plain text, key=value pairs, lines starting with # are comments.
 #pragma once
 
 #include <string>
 
 namespace i18n {
 
-// 传入语言代码（如 "zh-CN"），会去 exe 目录下 lang/zh-CN.lng 加载。
-// 传空串或 "en" 表示英文（内置，不加载文件）。
+// Pass language code (e.g. "zh-CN") to load lang/zh-CN.lng from exe directory.
+// Pass empty string to follow system language (auto-detect system locale and load matching .lng).
+// Pass "en" to force English (built-in, no file loaded).
 void Init(const std::wstring& langCode);
 
-// 取翻译文本。找不到就返回内置英文。
+// Get translated text. Returns built-in English if key not found.
 const wchar_t* T(const char* key);
 
-// 当前语言代码
+// Current language code
 const std::wstring& CurrentLang();
 
 }  // namespace i18n

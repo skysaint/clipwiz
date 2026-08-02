@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "imagecodec.h"
+#include "raii.h"
 #include "util.h"
 
 namespace clip {
@@ -32,7 +33,7 @@ void EnsureFormats() {
     }
 }
 
-// 读一个注册格式的全部字节
+// Read all bytes of a registered format
 bool GetFormatBytes(UINT fmt, std::vector<uint8_t>& out, uint32_t maxBytes) {
     HANDLE h = GetClipboardData(fmt);
     if (!h) {
@@ -42,16 +43,18 @@ bool GetFormatBytes(UINT fmt, std::vector<uint8_t>& out, uint32_t maxBytes) {
     if (size == 0 || size > maxBytes) {
         return false;
     }
-    const void* ptr = GlobalLock(h);
-    if (!ptr) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         return false;
     }
+    
+    const void* ptr = lock.get();
     out.assign(static_cast<const uint8_t*>(ptr), static_cast<const uint8_t*>(ptr) + size);
-    GlobalUnlock(h);
     return !out.empty();
 }
 
-// 读 CF_UNICODETEXT
+// Read CF_UNICODETEXT
 bool GetText(std::wstring& out, uint32_t maxBytes) {
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
     if (!h) {
@@ -61,28 +64,32 @@ bool GetText(std::wstring& out, uint32_t maxBytes) {
     if (size == 0 || size > maxBytes) {
         return false;
     }
-    const wchar_t* ptr = static_cast<const wchar_t*>(GlobalLock(h));
-    if (!ptr) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         return false;
     }
-    out.assign(ptr);  // 到 NUL 为止
-    GlobalUnlock(h);
+    
+    const wchar_t* ptr = static_cast<const wchar_t*>(lock.get());
+    out.assign(ptr);  // up to NUL terminator
     return !out.empty();
 }
 
-// 读 CF_HDROP → 路径列表（每行一个）
+// Read CF_HDROP -> path list (one per line)
 bool GetFileDrop(std::vector<uint8_t>& out) {
     HANDLE h = GetClipboardData(CF_HDROP);
     if (!h) {
         return false;
     }
-    HDROP drop = static_cast<HDROP>(GlobalLock(h));
-    if (!drop) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         return false;
     }
+    
+    HDROP drop = static_cast<HDROP>(lock.get());
     UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
     if (count == 0 || count > 10000) {
-        GlobalUnlock(h);
         return false;
     }
     std::wstring paths;
@@ -96,29 +103,28 @@ bool GetFileDrop(std::vector<uint8_t>& out) {
         paths += file;
         paths += L'\n';
     }
-    GlobalUnlock(h);
     if (paths.empty()) {
         return false;
     }
-    // 存为 UTF-16LE 字节
+    // Store as UTF-16LE bytes
     out.assign(reinterpret_cast<const uint8_t*>(paths.data()),
                reinterpret_cast<const uint8_t*>(paths.data()) + paths.size() * sizeof(wchar_t));
     return true;
 }
 
-// 读图片（CF_DIBV5 / CF_DIB / CF_BITMAP）→ PNG
+// Read image (CF_DIBV5 / CF_DIB / CF_BITMAP) -> PNG
 bool GetImage(std::vector<uint8_t>& png, uint32_t& w, uint32_t& h, uint32_t maxPixels) {
-    // 优先 DIBV5 / DIB
+    // Prefer DIBV5 / DIB
     HANDLE hMem = GetClipboardData(CF_DIBV5);
     if (!hMem) {
         hMem = GetClipboardData(CF_DIB);
     }
     if (hMem) {
         SIZE_T size = GlobalSize(hMem);
-        const void* ptr = GlobalLock(hMem);
-        if (ptr && size > 0) {
+        raii::GlobalLockGuard lock(hMem);
+        if (lock && size > 0) {
+            const void* ptr = lock.get();
             bool ok = imagecodec::DibToPng(ptr, size, png, w, h);
-            GlobalUnlock(hMem);
             if (ok) {
                 if (static_cast<uint64_t>(w) * h > maxPixels) {
                     png.clear();
@@ -126,13 +132,9 @@ bool GetImage(std::vector<uint8_t>& png, uint32_t& w, uint32_t& h, uint32_t maxP
                 }
                 return true;
             }
-        } else {
-            if (ptr) {
-                GlobalUnlock(hMem);
-            }
         }
     }
-    // 兜底 CF_BITMAP
+    // Fallback: CF_BITMAP
     HANDLE hb = GetClipboardData(CF_BITMAP);
     if (!hb) {
         return false;
@@ -148,19 +150,22 @@ bool GetImage(std::vector<uint8_t>& png, uint32_t& w, uint32_t& h, uint32_t maxP
     return true;
 }
 
-// 往剪贴板写一个注册格式
+// Write a registered format to clipboard
 bool SetFormatBytes(UINT fmt, const void* data, size_t size) {
     HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, size);
     if (!h) {
         return false;
     }
-    void* ptr = GlobalLock(h);
-    if (!ptr) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         GlobalFree(h);
         return false;
     }
+    
+    void* ptr = lock.get();
     memcpy(ptr, data, size);
-    GlobalUnlock(h);
+    
     if (!SetClipboardData(fmt, h)) {
         GlobalFree(h);
         return false;
@@ -169,18 +174,27 @@ bool SetFormatBytes(UINT fmt, const void* data, size_t size) {
 }
 
 bool SetUnicodeText(const std::wstring& text) {
+    if (text.empty()) {
+        return false;
+    }
+    
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!h) {
         return false;
     }
-    wchar_t* ptr = static_cast<wchar_t*>(GlobalLock(h));
-    if (!ptr) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         GlobalFree(h);
         return false;
     }
+    
+    wchar_t* ptr = static_cast<wchar_t*>(lock.get());
     memcpy(ptr, text.data(), bytes);
-    GlobalUnlock(h);
+    // Ensure null-terminated
+    ptr[text.size()] = L'\0';
+    
     if (!SetClipboardData(CF_UNICODETEXT, h)) {
         GlobalFree(h);
         return false;
@@ -205,10 +219,10 @@ bool SetImagePng(const std::vector<uint8_t>& png) {
 }
 
 bool SetFileDrop(const std::vector<uint8_t>& data) {
-    // data 是 UTF-16LE 路径列表（每行一个）
+    // data is UTF-16LE path list (one per line)
     std::wstring paths(reinterpret_cast<const wchar_t*>(data.data()), data.size() / sizeof(wchar_t));
 
-    // 数文件数
+    // Count files
     UINT count = 0;
     size_t pos = 0;
     while (pos < paths.size()) {
@@ -225,8 +239,8 @@ bool SetFileDrop(const std::vector<uint8_t>& data) {
         return false;
     }
 
-    // 构造 DROPFILES
-    // DROPFILES 结构后面跟双 NUL 结尾的多字符串
+    // Build DROPFILES structure
+    // DROPFILES followed by double-NUL terminated multi-string
     size_t charsLen = 0;
     pos = 0;
     while (pos < paths.size()) {
@@ -235,27 +249,30 @@ bool SetFileDrop(const std::vector<uint8_t>& data) {
             eol = paths.size();
         }
         size_t lineLen = eol - pos;
-        // 去掉 \r
+        // Strip \r
         while (lineLen > 0 && paths[pos + lineLen - 1] == L'\r') {
             --lineLen;
         }
         if (lineLen > 0) {
-            charsLen += lineLen + 1;  // 每条后面一个 NUL
+            charsLen += lineLen + 1;  // NUL after each entry
         }
         pos = eol + 1;
     }
-    charsLen += 1;  // 最终额外 NUL
+    charsLen += 1;  // Final extra NUL
 
     const size_t totalSize = sizeof(DROPFILES) + charsLen * sizeof(wchar_t);
     HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, totalSize);
     if (!h) {
         return false;
     }
-    DROPFILES* df = static_cast<DROPFILES*>(GlobalLock(h));
-    if (!df) {
+    
+    raii::GlobalLockGuard lock(h);
+    if (!lock) {
         GlobalFree(h);
         return false;
     }
+    
+    DROPFILES* df = static_cast<DROPFILES*>(lock.get());
     df->pFiles = sizeof(DROPFILES);
     df->fWide = TRUE;
     wchar_t* dst = reinterpret_cast<wchar_t*>(reinterpret_cast<uint8_t*>(df) + sizeof(DROPFILES));
@@ -277,7 +294,7 @@ bool SetFileDrop(const std::vector<uint8_t>& data) {
         pos = eol + 1;
     }
     *dst = L'\0';
-    GlobalUnlock(h);
+    
     if (!SetClipboardData(CF_HDROP, h)) {
         GlobalFree(h);
         return false;
@@ -316,7 +333,7 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
         return false;
     }
 
-    // 排除标记：有些程序（密码管理器）不想被记录
+    // Exclusion flags: some programs (password managers) don't want to be recorded
     if ((g_fmtIgnore1 && IsClipboardFormatAvailable(g_fmtIgnore1)) ||
         (g_fmtIgnore2 && IsClipboardFormatAvailable(g_fmtIgnore2))) {
         CloseClipboard();
@@ -325,21 +342,21 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
 
     bool got = false;
 
-    // 优先级 1: RTF
+    // Priority 1: RTF
     if (!got && g_fmtRtf && IsClipboardFormatAvailable(g_fmtRtf)) {
         if (GetFormatBytes(g_fmtRtf, data, maxTextBytes)) {
             kind = ItemKind::Rtf;
             got = true;
         }
     }
-    // 优先级 2: HTML
+    // Priority 2: HTML
     if (!got && g_fmtHtml && IsClipboardFormatAvailable(g_fmtHtml)) {
         if (GetFormatBytes(g_fmtHtml, data, maxTextBytes)) {
             kind = ItemKind::Html;
             got = true;
         }
     }
-    // 优先级 3: 图片
+    // Priority 3: Image
     if (!got && (IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB) ||
                  IsClipboardFormatAvailable(CF_BITMAP))) {
         std::vector<uint8_t> png;
@@ -353,14 +370,14 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
             got = true;
         }
     }
-    // 优先级 4: 文件列表
+    // Priority 4: File list
     if (!got && IsClipboardFormatAvailable(CF_HDROP)) {
         if (GetFileDrop(data)) {
             kind = ItemKind::FileDrop;
             got = true;
         }
     }
-    // 优先级 5: 纯文本
+    // Priority 5: Plain text
     if (!got && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
         std::wstring text;
         if (GetText(text, maxTextBytes)) {
@@ -382,7 +399,7 @@ bool WriteItem(HWND owner, const Item& item) {
         return false;
     }
     EmptyClipboard();
-    g_selfSeq = GetClipboardSequenceNumber();  // 先记一下，SetClipboardData 后会变
+    g_selfSeq = GetClipboardSequenceNumber();  // Record now; changes after SetClipboardData
 
     bool ok = false;
     switch (item.kind) {
@@ -397,7 +414,7 @@ bool WriteItem(HWND owner, const Item& item) {
             break;
         case ItemKind::Html: {
             ok = SetFormatBytes(g_fmtHtml, item.data.data(), item.data.size());
-            // 附带纯文本 fallback
+            // Attach plain text fallback
             std::wstring plain = Store::TextOf(item);
             if (!plain.empty()) {
                 SetUnicodeText(plain);
@@ -417,7 +434,7 @@ bool WriteItem(HWND owner, const Item& item) {
         }
         case ItemKind::FileDrop: {
             ok = SetFileDrop(item.data);
-            // 附带路径文本
+            // Attach path text
             std::wstring text(reinterpret_cast<const wchar_t*>(item.data.data()),
                               item.data.size() / sizeof(wchar_t));
             if (!text.empty()) {
@@ -427,7 +444,7 @@ bool WriteItem(HWND owner, const Item& item) {
         }
     }
 
-    // 更新自我序列号（写完后序列号变了）
+    // Update self sequence number (changed after write)
     g_selfSeq = GetClipboardSequenceNumber();
     CloseClipboard();
     return ok;

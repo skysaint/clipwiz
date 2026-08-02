@@ -20,7 +20,7 @@ struct KeyName {
     const wchar_t* name;
 };
 
-// 只列常用键。不在表里的键走 "Key%02X" 这种兜底写法，保证配置文件能原样读回来。
+// Only common keys listed. Keys not in the table use "Key%02X" fallback to ensure config round-trips.
 const KeyName kKeyNames[] = {
     {VK_SPACE, L"Space"},     {VK_RETURN, L"Enter"},   {VK_TAB, L"Tab"},
     {VK_BACK, L"Backspace"},  {VK_ESCAPE, L"Esc"},     {VK_INSERT, L"Insert"},
@@ -129,7 +129,7 @@ uint32_t FromText(const std::wstring& text) {
         size_t plus = text.find(L'+', pos);
         std::wstring token =
             text.substr(pos, plus == std::wstring::npos ? std::wstring::npos : plus - pos);
-        // 顺手把空格吃掉，"Ctrl + V" 这种手写法也能认
+        // Strip spaces: accept "Ctrl + V" style hand-typed notation
         while (!token.empty() && token.front() == L' ') {
             token.erase(token.begin());
         }
@@ -206,7 +206,7 @@ bool IsUsable(uint32_t code) {
     if (vk == 0 || mods == 0) {
         return false;
     }
-    // 只按一个 Shift 当修饰键会把正常输入大写字母全抢走
+    // Shift alone as modifier would intercept all uppercase typing
     if (mods == MOD_SHIFT) {
         return false;
     }
@@ -238,7 +238,7 @@ bool Manager::Register(int id, uint32_t code) {
         return false;
     }
     Unregister(id);
-    // MOD_NOREPEAT：按住不放不会连发
+    // MOD_NOREPEAT: no auto-repeat when held down
     if (!RegisterHotKey(hwnd_, id, ModsOf(code) | MOD_NOREPEAT, VkOf(code))) {
         return false;
     }

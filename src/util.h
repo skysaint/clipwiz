@@ -1,4 +1,4 @@
-// util.h — 路径、原子写文件、主题色、DPI、字体、开机自启等杂项工具
+// util.h — Path, atomic file write, theme colors, DPI, fonts, autostart utilities
 #pragma once
 
 #include <windows.h>
@@ -9,16 +9,16 @@
 
 namespace util {
 
-// 界面配色，只有浅色和深色两套
+// UI color scheme, only light and dark modes
 struct Theme {
-    COLORREF bg;      // 列表背景
-    COLORREF bgAlt;   // 分区背景（置顶区）
-    COLORREF fg;      // 正文
-    COLORREF dim;     // 次要文字（序号、快捷键、尺寸说明）
-    COLORREF sel;     // 选中行背景
-    COLORREF selFg;   // 选中行文字
-    COLORREF line;    // 分隔线
-    COLORREF accent;  // 置顶标记
+    COLORREF bg;      // List background
+    COLORREF bgAlt;   // Section background (pinned area)
+    COLORREF fg;      // Main text
+    COLORREF dim;     // Secondary text (index, hotkey, size description)
+    COLORREF sel;     // Selected row background
+    COLORREF selFg;   // Selected row text
+    COLORREF line;    // Separator line
+    COLORREF accent;  // Pin marker
 };
 
 const wchar_t* AppName();
@@ -26,15 +26,20 @@ const wchar_t* AppName();
 std::wstring ExePath();
 std::wstring ExeDir();
 
-// 数据目录默认 = exe 所在目录（绿色）；可通过 SetDataDir 改为别处
+// Data directory defaults to exe directory (portable); can be changed via SetDataDir
 const std::wstring& DataDir();
 void SetDataDir(const std::wstring& dir);
 std::wstring ConfigPath();
 std::wstring StorePath();
 bool EnsureDir(const std::wstring& dir);
 
+// Path handling: convert to relative path (if under exe directory)
+std::wstring MakeRelativePath(const std::wstring& absPath);
+// Path handling: convert to absolute path (for file dialogs)
+std::wstring MakeAbsolutePath(const std::wstring& relPath);
+
 bool ReadWholeFile(const std::wstring& path, std::vector<uint8_t>& out);
-// 写临时文件 → 刷盘 → 原子替换，断电最坏回到上一个完整版本
+// Atomic write: write temp file -> flush -> replace. Worst case on power failure reverts to last complete version
 bool WriteFileAtomic(const std::wstring& path, const void* data, size_t size);
 uint64_t FileSizeOf(const std::wstring& path);
 
@@ -43,7 +48,7 @@ std::wstring TimeStampForFileName();
 uint64_t Hash64(const void* data, size_t size);
 
 std::wstring Format(const wchar_t* fmt, ...);
-// 把多行文本压成一行摘要，控制字符换成空格，超长截断
+// Compress multi-line text to a one-line summary, control chars to spaces, truncate if too long
 std::wstring OneLinePreview(const std::wstring& text, size_t maxLen);
 
 bool IsSystemDarkMode();

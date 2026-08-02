@@ -15,11 +15,11 @@ const char kMagic[4] = {'C', 'L', 'P', 'W'};
 
 constexpr uint32_t kFlagPinned = 0x1;
 
-// 单条 data 的硬上限，防损坏文件把内存撑爆（64 MB）
+// Hard cap per item data to prevent corrupted files from exhausting memory (64 MB)
 constexpr uint32_t kMaxDataLen = 64u * 1024u * 1024u;
 constexpr uint32_t kMaxItemCount = 100000u;
 
-// FILETIME 一天的 tick 数
+// FILETIME ticks per day
 constexpr uint64_t kTicksPerDay = 24ULL * 60 * 60 * 10000000;
 
 template <typename T>
@@ -43,11 +43,11 @@ bool FileExists(const std::wstring& path) {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-// 从 "HTML Format" 原始数据里提取纯文本首行（粗略：去标签）
+// Extract plain text first line from "HTML Format" raw data (rough: strip tags)
 std::wstring HtmlToPlainText(const std::vector<uint8_t>& data) {
-    // HTML Format 是 UTF-8 文本
+    // HTML Format is UTF-8 text
     std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
-    // 找 <html> 或 <body> 之后的内容
+    // Find content after <html> or <body>
     size_t start = 0;
     size_t bodyPos = raw.find("<body");
     if (bodyPos == std::string::npos) {
@@ -57,7 +57,7 @@ std::wstring HtmlToPlainText(const std::vector<uint8_t>& data) {
         size_t gt = raw.find('>', bodyPos);
         start = (gt != std::string::npos) ? gt + 1 : bodyPos;
     }
-    // 去标签、解码基本实体
+    // Strip tags, decode basic entities
     std::wstring text;
     bool inTag = false;
     for (size_t i = start; i < raw.size() && text.size() < 500; ++i) {
@@ -79,25 +79,25 @@ std::wstring HtmlToPlainText(const std::vector<uint8_t>& data) {
             }
             continue;
         }
-        // 只处理 ASCII 范围，UTF-8 多字节先按单字节放（预览用，不求精确）
+        // Only handle ASCII range; UTF-8 multibyte treated as single bytes (preview only, not exact)
         text += static_cast<wchar_t>(static_cast<unsigned char>(ch));
     }
     return text;
 }
 
-// 从 RTF 原始数据里提取纯文本（粗略：去控制字和分组）
+// Extract plain text from RTF raw data (rough: strip control words and groups)
 std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
     std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
     std::wstring text;
     int depth = 0;
-    bool skipDest = false;  // 跳过 \fonttbl \colortbl 等目标组
+    bool skipDest = false;  // Skip destination groups like \fonttbl \colortbl
     size_t i = 0;
     while (i < raw.size() && text.size() < 500) {
         char ch = raw[i];
         if (ch == '{') {
             ++depth;
             ++i;
-            // 看紧跟着是不是 \fonttbl \colortbl \stylesheet \pict 之类的
+            // Check if followed by \fonttbl \colortbl \stylesheet \pict etc.
             if (i < raw.size() && raw[i] == '\\') {
                 size_t wordStart = i + 1;
                 size_t wordEnd = wordStart;
@@ -138,7 +138,7 @@ std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
                 continue;
             }
             if (next == '\'') {
-                // \'xx 十六进制字符
+                // \'xx hexadecimal character
                 ++i;
                 if (i + 1 < raw.size()) {
                     char hex[3] = {raw[i], raw[i + 1], 0};
@@ -154,20 +154,20 @@ std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
                 ++i;
                 continue;
             }
-            // 控制字
+            // Control word
             size_t wordStart = i;
             while (i < raw.size() && isalpha(static_cast<unsigned char>(raw[i]))) {
                 ++i;
             }
             std::string word = raw.substr(wordStart, i - wordStart);
-            // 跳过可选的数字参数
+            // Skip optional numeric parameter
             if (i < raw.size() && (raw[i] == '-' || isdigit(static_cast<unsigned char>(raw[i])))) {
                 while (i < raw.size() &&
                        (raw[i] == '-' || isdigit(static_cast<unsigned char>(raw[i])))) {
                     ++i;
                 }
             }
-            // 控制字后的空格是分隔符，吃掉
+            // Space after control word is a delimiter, consume it
             if (i < raw.size() && raw[i] == ' ') {
                 ++i;
             }
@@ -190,13 +190,13 @@ std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
 
 }  // namespace
 
-// ------------------------------------------------------------------ 公共工具
+// ------------------------------------------------------------------ Public utilities
 
 std::wstring Store::TextOf(const Item& item) {
     switch (item.kind) {
         case ItemKind::Text:
         case ItemKind::FileDrop:
-            // data 就是 UTF-16LE
+            // data is UTF-16LE
             return std::wstring(reinterpret_cast<const wchar_t*>(item.data.data()),
                                 item.data.size() / sizeof(wchar_t));
         case ItemKind::Html:
@@ -216,7 +216,7 @@ std::wstring MakeItemPreview(const Item& item) {
             return util::Format(i18n::T("preview.image"), item.imgW, item.imgH);
         case ItemKind::FileDrop: {
             std::wstring paths = Store::TextOf(item);
-            // 数行数
+            // Count lines
             int count = 0;
             std::wstring first;
             size_t pos = 0;
@@ -235,7 +235,7 @@ std::wstring MakeItemPreview(const Item& item) {
                 }
                 pos = (eol == std::wstring::npos) ? paths.size() : eol + 1;
             }
-            // 只取文件名部分
+            // Extract filename only
             size_t slash = first.find_last_of(L"\\/");
             std::wstring name = (slash != std::wstring::npos) ? first.substr(slash + 1) : first;
             if (count <= 1) {
@@ -292,14 +292,14 @@ void Store::SetLimits(int maxHistory, int expiryDays) {
     Evict();
 }
 
-// 置顶区保持手动顺序不动；非置顶区按 usedAt 降序
+// Pinned section keeps manual order; unpinned section sorted by usedAt descending
 void Store::Reorder() {
     std::stable_sort(items_.begin(), items_.end(), [](const Item& a, const Item& b) {
         if (a.pinned != b.pinned) {
-            return a.pinned;  // 置顶在前
+            return a.pinned;  // Pinned items first
         }
         if (a.pinned) {
-            return false;  // 置顶区内部保持原有相对顺序（stable_sort 保证）
+            return false;  // Within pinned section, maintain original relative order (stable_sort guarantees)
         }
         if (a.usedAt != b.usedAt) {
             return a.usedAt > b.usedAt;
@@ -309,12 +309,12 @@ void Store::Reorder() {
 }
 
 void Store::Evict() {
-    // 条数上限只统计未置顶
+    // History limit counts only unpinned items
     for (;;) {
         if (HistoryCount() <= maxHistory_) {
             break;
         }
-        // 找 usedAt 最小的非置顶条目
+        // Find the unpinned item with the smallest usedAt
         size_t victim = items_.size();
         uint64_t oldest = UINT64_MAX;
         for (size_t i = 0; i < items_.size(); ++i) {
@@ -351,14 +351,18 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     const uint64_t hash = util::Hash64(data.data(), data.size());
     const uint64_t now = util::NowFileTime();
 
-    // 去重：同类型同内容 → 刷新 usedAt，提到非置顶区最前
+    // Dedup: same kind and same content
     for (Item& item : items_) {
         if (item.kind == kind && item.hash == hash && item.data == data) {
-            item.usedAt = now;
-            if (!item.pinned) {
+            if (item.pinned) {
+                // Pinned item duplicate: do nothing, preserve manual order
+                return item.id;
+            } else {
+                // Unpinned duplicate: refresh usedAt and move to front of unpinned section
+                item.usedAt = now;
                 Reorder();
+                return item.id;
             }
-            return item.id;
         }
     }
 
@@ -407,19 +411,19 @@ bool Store::Touch(uint64_t id) {
     }
     item->usedAt = util::NowFileTime();
     if (!item->pinned) {
-        Reorder();  // 非置顶的刷新后提到前面
+        Reorder();  // Reorder unpinned section after usedAt refresh
     }
-    // 置顶的不动位置
+    // Pinned items don't change position
     return true;
 }
 
 bool Store::MovePinned(uint64_t id, int delta) {
-    // 找当前在置顶区里的下标
+    // Find current index within pinned section
     int pinnedIdx = -1;
     int count = 0;
     for (size_t i = 0; i < items_.size(); ++i) {
         if (!items_[i].pinned) {
-            break;  // 置顶区在前面
+            break;  // Pinned section is at the front
         }
         if (items_[i].id == id) {
             pinnedIdx = count;
@@ -433,7 +437,7 @@ bool Store::MovePinned(uint64_t id, int delta) {
     if (target < 0 || target >= count) {
         return false;
     }
-    // 在 items_ 里交换位置
+    // Swap positions in items_
     size_t srcIdx = static_cast<size_t>(pinnedIdx);
     size_t dstIdx = static_cast<size_t>(target);
     Item tmp = std::move(items_[srcIdx]);
@@ -447,7 +451,7 @@ bool Store::MovePinnedTo(uint64_t id, int targetIndex) {
     if (targetIndex < 0 || targetIndex >= count) {
         return false;
     }
-    // 找到当前条目
+    // Find the current item
     size_t srcIdx = items_.size();
     for (size_t i = 0; i < items_.size(); ++i) {
         if (items_[i].id == id && items_[i].pinned) {
@@ -464,7 +468,7 @@ bool Store::MovePinnedTo(uint64_t id, int targetIndex) {
     return true;
 }
 
-// ------------------------------------------------------------------ 持久化
+// ------------------------------------------------------------------ Persistence
 
 Store::LoadResult Store::PreserveCorrupt() {
     items_.clear();

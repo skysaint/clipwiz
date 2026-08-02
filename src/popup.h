@@ -1,6 +1,6 @@
-// popup.h — 快速粘贴框
+// popup.h — Quick paste popup window
 //
-// 列表自绘，标题栏可拖动，支持 Ctrl+悬停预览、置顶拖拽排序。
+// Owner-drawn list, draggable title bar, Ctrl+hover preview, pinned item drag reorder.
 #pragma once
 
 #include <windows.h>
@@ -17,7 +17,7 @@ public:
     virtual Store& GetStore() = 0;
     virtual const util::Theme& GetTheme() const = 0;
     virtual int RowsVisible() const = 0;
-    virtual int PopupPosition() const = 0;  // 0=鼠标 1=光标 2=上次
+    virtual int PopupPosition() const = 0;  // 0=mouse 1=caret 2=last
     virtual void GetLastPos(int& x, int& y) const = 0;
     virtual void SaveLastPos(int x, int y) = 0;
 
