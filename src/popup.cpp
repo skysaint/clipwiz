@@ -56,6 +56,7 @@ struct State {
     int sel = -1;
     int top = 0;
     int modalDepth = 0;
+    bool hideRestoreFocus = true;  // Whether Hide() should restore focus to previous window
 
     // Thumbnail cache
     std::vector<std::pair<uint64_t, Thumb>> thumbs;
@@ -761,6 +762,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_ACTIVATE:
             if (LOWORD(wparam) == WA_INACTIVE && g.modalDepth == 0) {
+                g.hideRestoreFocus = false;  // Lost focus passively, don't fight for foreground
                 Hide();
             }
             return 0;
@@ -1046,11 +1048,15 @@ void Hide() {
     g.host->SaveLastPos(rc.left, rc.top);
     ShowWindow(g.hwnd, SW_HIDE);
     SetWindowTextW(g.edit, L"");
-    // Return focus to the previous foreground window
-    HWND target = paste::Target();
-    if (target) {
-        SetForegroundWindow(target);
+    // Return focus to the previous foreground window (only on active user action,
+    // not when we lost focus passively to another window/menu)
+    if (g.hideRestoreFocus) {
+        HWND target = paste::Target();
+        if (target) {
+            SetForegroundWindow(target);
+        }
     }
+    g.hideRestoreFocus = true;  // Reset for next time
 }
 
 void Toggle() {
