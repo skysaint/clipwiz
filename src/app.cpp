@@ -18,6 +18,8 @@ constexpr UINT kMsgTray = WM_APP + 1;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTimerSave = 1;
 constexpr UINT kTimerWriteCheck = 2;
+constexpr UINT kTimerClipboard = 3;
+constexpr UINT kClipboardDelayMs = 150;  // Debounce: wait for multi-stage copy (Excel) to settle
 constexpr int kSaveDelayMs = 800;
 constexpr int kWriteCheckMs = 200;
 
@@ -166,7 +168,10 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     switch (msg) {
         case WM_CLIPBOARDUPDATE:
-            OnClipboardUpdate();
+            // Debounce: apps like Excel open/close the clipboard several times
+            // during a single copy. Restart the timer on each update and only
+            // capture after things settle, so we never grab mid-copy.
+            SetTimer(hwnd_, kTimerClipboard, kClipboardDelayMs, nullptr);
             return 0;
 
         case WM_HOTKEY:
@@ -191,6 +196,9 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 OnTimerSave();
             } else if (wparam == kTimerWriteCheck) {
                 OnTimerWriteCheck();
+            } else if (wparam == kTimerClipboard) {
+                KillTimer(hwnd_, kTimerClipboard);
+                OnClipboardUpdate();
             }
             return 0;
 

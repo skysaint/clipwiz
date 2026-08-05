@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "imagecodec.h"
+#include "log.h"
 #include "raii.h"
 #include "util.h"
 
@@ -329,8 +330,22 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
     imgW = 0;
     imgH = 0;
 
-    if (!OpenClipboard(nullptr)) {
+    // Retry briefly: Office apps may still hold the clipboard right after a copy
+    bool opened = false;
+    int attempt = 0;
+    for (; attempt < 4; ++attempt) {
+        if (OpenClipboard(nullptr)) {
+            opened = true;
+            break;
+        }
+        Sleep(20);
+    }
+    if (!opened) {
+        LOG_WARNING("Capture: OpenClipboard failed after retries (clipboard busy)");
         return false;
+    }
+    if (attempt > 0) {
+        LOG_INFO("Capture: OpenClipboard succeeded after %d retries", attempt);
     }
 
     // Exclusion flags: some programs (password managers) don't want to be recorded
@@ -341,6 +356,7 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
     }
 
     bool got = false;
+    std::vector<uint8_t> dibRaw;  // Raw DIB bytes, converted to PNG after CloseClipboard
 
     // Priority 1: RTF
     if (!got && g_fmtRtf && IsClipboardFormatAvailable(g_fmtRtf)) {
@@ -356,18 +372,34 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
             got = true;
         }
     }
-    // Priority 3: Image
+    // Priority 3: Image — copy raw DIB bytes now, do heavy PNG conversion after release
     if (!got && (IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB) ||
                  IsClipboardFormatAvailable(CF_BITMAP))) {
-        std::vector<uint8_t> png;
-        uint32_t w = 0;
-        uint32_t h = 0;
-        if (GetImage(png, w, h, maxImagePixels)) {
-            kind = ItemKind::Image;
-            data = std::move(png);
-            imgW = w;
-            imgH = h;
-            got = true;
+        HANDLE hMem = GetClipboardData(CF_DIBV5);
+        if (!hMem) {
+            hMem = GetClipboardData(CF_DIB);
+        }
+        if (hMem) {
+            SIZE_T size = GlobalSize(hMem);
+            raii::GlobalLockGuard lock(hMem);
+            if (lock && size > 0 && size <= 256u * 1024u * 1024u) {
+                const uint8_t* ptr = static_cast<const uint8_t*>(lock.get());
+                dibRaw.assign(ptr, ptr + size);
+                got = true;
+            }
+        }
+        if (!got && IsClipboardFormatAvailable(CF_BITMAP)) {
+            // Rare fallback: HBITMAP is only usable while the clipboard is open
+            std::vector<uint8_t> png;
+            uint32_t w = 0;
+            uint32_t h = 0;
+            if (GetImage(png, w, h, maxImagePixels)) {
+                kind = ItemKind::Image;
+                data = std::move(png);
+                imgW = w;
+                imgH = h;
+                got = true;
+            }
         }
     }
     // Priority 4: File list
@@ -390,6 +422,22 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
     }
 
     CloseClipboard();
+
+    // Convert DIB to PNG outside the clipboard lock (no longer blocking other apps)
+    if (!dibRaw.empty()) {
+        std::vector<uint8_t> png;
+        uint32_t w = 0;
+        uint32_t h = 0;
+        if (imagecodec::DibToPng(dibRaw.data(), dibRaw.size(), png, w, h) &&
+            static_cast<uint64_t>(w) * h <= maxImagePixels) {
+            kind = ItemKind::Image;
+            data = std::move(png);
+            imgW = w;
+            imgH = h;
+            return true;
+        }
+        return false;
+    }
     return got;
 }
 
