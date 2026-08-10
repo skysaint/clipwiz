@@ -54,6 +54,7 @@ const Entry kDefaults[] = {
     {"settings.autostart_yes", L"Yes"},
     {"settings.max_history", L"Max saved items:"},
     {"settings.expiry_days", L"Item expiry (days):"},
+    {"settings.clean_on_exit", L"Clean on Exit"},
     {"settings.language", L"Language:"},
     {"settings.lang_auto", L"Follow system"},
     {"settings.theme", L"Theme:"},
