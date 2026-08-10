@@ -47,6 +47,7 @@ HFONT g_font = nullptr;
 HFONT g_fontBold = nullptr;
 HWND g_settingsDlg = nullptr;
 int g_dpi = 96;
+HICON g_winKeyIcon = nullptr;
 
 int Dip(int value) {
     return MulDiv(value, g_dpi, 96);
@@ -68,13 +69,35 @@ HWND MakeLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
     return MakeCtrl(parent, L"STATIC", text, SS_LEFT, x, y, w, h, -1);
 }
 
+HICON LoadWinKeyIcon() {
+    if (!g_winKeyIcon) {
+        g_winKeyIcon = static_cast<HICON>(
+            LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_WINBADGE), IMAGE_ICON,
+                       Dip(16), Dip(16), LR_DEFAULTCOLOR | LR_SHARED));
+    }
+    return g_winKeyIcon;
+}
+
+HWND MakeWinKeyCheckbox(HWND parent, int x, int y, int w, int h, int id, bool checked) {
+    HICON icon = LoadWinKeyIcon();
+    HWND hwnd = MakeCtrl(parent, L"BUTTON", icon ? L"" : i18n::T("settings.win_key"),
+                         BS_AUTOCHECKBOX | BS_ICON | WS_TABSTOP, x, y, w, h, id);
+    if (hwnd && icon) {
+        SendMessageW(hwnd, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(icon));
+    }
+    if (checked) {
+        CheckDlgButton(parent, id, BST_CHECKED);
+    }
+    return hwnd;
+}
+
 // Returns next Y position after group header
-int MakeGroupHeader(HWND parent, const wchar_t* text, int y) {
-    HWND label = MakeCtrl(parent, L"STATIC", text, SS_LEFT, 10, y, 460, 14, -1);
+int MakeGroupHeader(HWND parent, const wchar_t* text, int y, int width) {
+    HWND label = MakeCtrl(parent, L"STATIC", text, SS_LEFT, 10, y, width, 14, -1);
     if (label && g_fontBold) {
         SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(g_fontBold), FALSE);
     }
-    MakeCtrl(parent, L"STATIC", L"", SS_ETCHEDHORZ, 10, y + 16, 460, 2, -1);
+    MakeCtrl(parent, L"STATIC", L"", SS_ETCHEDHORZ, 10, y + 16, width, 2, -1);
     return y + 22;
 }
 
@@ -84,18 +107,25 @@ void PopulateControls(HWND hwnd) {
     // Layout constants (DIP) — generous sizing for readability
     constexpr int kLabelW = 120;
     constexpr int kFieldX = 135;
-    constexpr int kFieldW = 160;
+    constexpr int kFieldW = 220;
     constexpr int kRowH = 28;       // Row height for General section (1.5x original)
     constexpr int kHkRowH = 30;     // Row height for Shortcuts section (larger)
     constexpr int kEditH = 22;      // Edit/combo/hotkey control height
-    constexpr int kBtnH = 22;       // Button height
     constexpr int kPad = 12;
-    constexpr int kDlgW = 490;
+    constexpr int kDlgW = 590;
+    constexpr int kCheckboxH = 16;
+    constexpr int kCheckboxOffsetY = (kEditH - kCheckboxH) / 2;
+    constexpr int kWinCheckboxW = 34;
+    constexpr int kPinnedHkW = 190;
+    constexpr int kPinnedColW = 275;
+    constexpr int kGroupW = kDlgW - 20;
+    constexpr int kFontFieldW = kFieldW + 2;
+    constexpr int kFontFieldX = kFieldX - 1;
 
     int y = kPad;
 
     // ===================== Section 1: General =====================
-    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.general"), y);
+    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.general"), y, kGroupW);
 
     // Autostart checkbox
     MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.autostart"),
@@ -116,6 +146,13 @@ void PopulateControls(HWND hwnd) {
     MakeCtrl(hwnd, L"EDIT", util::Format(L"%d", cfg.expiryDays).c_str(),
              ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
              kFieldX, y, 60, kEditH, IDC_EXPIRYDAYS, WS_EX_CLIENTEDGE);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.clean_on_exit"),
+             BS_AUTOCHECKBOX | WS_TABSTOP,
+             kFieldX + 66, y + kCheckboxOffsetY, 120, kCheckboxH, IDC_CLEAN_ON_EXIT);
+    if (cfg.cleanOnExit)
+        CheckDlgButton(hwnd, IDC_CLEAN_ON_EXIT, BST_CHECKED);
+    // Enable/disable expiry days based on cleanOnExit
+    EnableWindow(GetDlgItem(hwnd, IDC_EXPIRYDAYS), !cfg.cleanOnExit);
     y += kRowH;
 
     // Language
@@ -154,17 +191,6 @@ void PopulateControls(HWND hwnd) {
     SendMessageW(cbPos, CB_SETCURSEL, cfg.popupPosition, 0);
     y += kRowH;
 
-    // Display font
-    MakeLabel(hwnd, i18n::T("settings.font"), kPad, y + 2, kLabelW, 16);
-    std::wstring fontText = cfg.fontName.empty()
-        ? std::wstring(i18n::T("settings.font_default_val"))
-        : util::Format(L"%s  %dpt", cfg.fontName.c_str(), cfg.fontSize);
-    MakeCtrl(hwnd, L"BUTTON", fontText.c_str(),
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX, y, 140, kBtnH, IDC_FONT_BTN);
-    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.font_default"),
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + 146, y, 100, kBtnH, IDC_FONT_RESET);
-    y += kRowH;
-
     // Data storage location
     MakeLabel(hwnd, i18n::T("settings.data_dir"), kPad, y + 2, kLabelW, 16);
     HWND cbData = MakeCtrl(hwnd, L"COMBOBOX", L"",
@@ -176,22 +202,32 @@ void PopulateControls(HWND hwnd) {
                  reinterpret_cast<LPARAM>(i18n::T("settings.data_portable")));
     SendMessageW(cbData, CB_SETCURSEL, util::IsPortable() ? 1 : 0, 0);
     MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.open_dir"),
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kBtnH, IDC_DATADIR_OPEN);
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kEditH, IDC_DATADIR_OPEN);
+    y += kRowH;
+
+    // Display font
+    MakeLabel(hwnd, i18n::T("settings.font"), kPad, y + 2, kLabelW, 16);
+    std::wstring fontText = cfg.fontName.empty()
+        ? std::wstring(i18n::T("settings.font_default_val"))
+        : util::Format(L"%s  %dpt", cfg.fontName.c_str(), cfg.fontSize);
+    MakeCtrl(hwnd, L"BUTTON", fontText.c_str(),
+             BS_PUSHBUTTON | WS_TABSTOP, kFontFieldX, y, kFontFieldW, kEditH, IDC_FONT_BTN);
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.font_default"),
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kEditH, IDC_FONT_RESET);
     y += kRowH + 8;
 
     // ===================== Section 2: Shortcuts =====================
-    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.shortcuts"), y);
+    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.shortcuts"), y, kGroupW);
 
     // Popup hotkey
     MakeLabel(hwnd, i18n::T("settings.popup_hotkey"), kPad, y + 2, kLabelW, 16);
     HWND hkPopup = MakeCtrl(hwnd, HOTKEY_CLASSW, L"",
                             WS_TABSTOP,
-                            kFieldX, y, 120, kEditH, IDC_POPUP_HK, WS_EX_CLIENTEDGE);
+                            kFieldX, y, kFieldW, kEditH, IDC_POPUP_HK, WS_EX_CLIENTEDGE);
     SendMessageW(hkPopup, HKM_SETHOTKEY, hotkey::ToControl(cfg.popupHotkey), 0);
-    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.win_key"),
-             BS_AUTOCHECKBOX | WS_TABSTOP, kFieldX + 126, y + 2, 60, 16, IDC_POPUP_WIN);
-    if (hotkey::ModsOf(cfg.popupHotkey) & MOD_WIN)
-        CheckDlgButton(hwnd, IDC_POPUP_WIN, BST_CHECKED);
+    MakeWinKeyCheckbox(hwnd, kFieldX + kFieldW + 6, y + kCheckboxOffsetY,
+                       kWinCheckboxW, kCheckboxH, IDC_POPUP_WIN,
+                       (hotkey::ModsOf(cfg.popupHotkey) & MOD_WIN) != 0);
     y += kHkRowH + 6;
 
     // Pinned item shortcuts label
@@ -202,19 +238,18 @@ void PopulateControls(HWND hwnd) {
     for (int i = 0; i < 10; ++i) {
         int col = i / 5;
         int row = i % 5;
-        int cx = kPad + col * 240;
+        int cx = kPad + col * kPinnedColW;
         int cy = y + row * kHkRowH;
 
         std::wstring numLabel = util::Format(L"%d:", i + 1);
         MakeLabel(hwnd, numLabel.c_str(), cx, cy + 2, 22, 16);
         HWND hk = MakeCtrl(hwnd, HOTKEY_CLASSW, L"",
                            WS_TABSTOP,
-                           cx + 25, cy, 110, kEditH, IDC_PIN_HK_BASE + i, WS_EX_CLIENTEDGE);
+                           cx + 25, cy, kPinnedHkW, kEditH, IDC_PIN_HK_BASE + i, WS_EX_CLIENTEDGE);
         SendMessageW(hk, HKM_SETHOTKEY, hotkey::ToControl(cfg.pinnedHotkeys[i]), 0);
-        MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.win_key"),
-                 BS_AUTOCHECKBOX | WS_TABSTOP, cx + 140, cy + 2, 60, 16, IDC_PIN_WIN_BASE + i);
-        if (hotkey::ModsOf(cfg.pinnedHotkeys[i]) & MOD_WIN)
-            CheckDlgButton(hwnd, IDC_PIN_WIN_BASE + i, BST_CHECKED);
+        MakeWinKeyCheckbox(hwnd, cx + 25 + kPinnedHkW + 6, cy + kCheckboxOffsetY,
+                           kWinCheckboxW, kCheckboxH, IDC_PIN_WIN_BASE + i,
+                           (hotkey::ModsOf(cfg.pinnedHotkeys[i]) & MOD_WIN) != 0);
     }
     y += 5 * kHkRowH + 10;
 
@@ -257,6 +292,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 Config& cfg = *g_cfg;
                 cfg.maxHistory = GetDlgItemInt(hwnd, IDC_MAXHISTORY, nullptr, FALSE);
                 cfg.expiryDays = GetDlgItemInt(hwnd, IDC_EXPIRYDAYS, nullptr, FALSE);
+                cfg.cleanOnExit = IsDlgButtonChecked(hwnd, IDC_CLEAN_ON_EXIT) == BST_CHECKED;
                 int langSel = static_cast<int>(
                     SendMessageW(GetDlgItem(hwnd, IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
                 if (langSel == 1) cfg.language = L"en";
@@ -324,6 +360,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             }
             if (id == IDC_DATADIR_OPEN) {
                 ShellExecuteW(hwnd, L"open", util::DataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                return TRUE;
+            }
+            if (id == IDC_CLEAN_ON_EXIT) {
+                bool checked = IsDlgButtonChecked(hwnd, IDC_CLEAN_ON_EXIT) == BST_CHECKED;
+                EnableWindow(GetDlgItem(hwnd, IDC_EXPIRYDAYS), !checked);
                 return TRUE;
             }
             break;
