@@ -6,6 +6,7 @@
 // Icon and manifest
 
 IDI_APPICON             ICON            "clipwiz.ico"
+IDI_WINBADGE            ICON            "windows.ico"
 1                       RT_MANIFEST     "app.manifest"
 
 /////////////////////////////////////////////////////////////////////////////

@@ -4,6 +4,7 @@
 
 // Icon resources
 #define IDI_APPICON                 101
+#define IDI_WINBADGE                102
 
 // Built-in language resources (compiled from lang/*.lng)
 #define IDR_LNG_ZHCN                2001
@@ -17,23 +18,24 @@
 #define IDC_AUTOSTART               1001
 #define IDC_MAXHISTORY              1002
 #define IDC_EXPIRYDAYS              1003
-#define IDC_LANGUAGE                1004
-#define IDC_THEME                   1005
-#define IDC_POPUPPOS                1006
-#define IDC_FONT_BTN                1007
-#define IDC_FONT_RESET              1008
-#define IDC_DATADIR                 1009
-#define IDC_DATADIR_OPEN            1010
+#define IDC_CLEAN_ON_EXIT           1004
+#define IDC_LANGUAGE                1005
+#define IDC_THEME                   1006
+#define IDC_POPUPPOS                1007
+#define IDC_FONT_BTN                1008
+#define IDC_FONT_RESET              1009
+#define IDC_DATADIR                 1010
+#define IDC_DATADIR_OPEN            1011
 
 // Types page controls
 #define IDC_TYPELIST                1020
 #define IDC_TYPEDESC                1021
 
 // Shortcuts page controls
-#define IDC_POPUP_HK                1030
-#define IDC_POPUP_WIN               1031
-#define IDC_PIN_HK_BASE             1040   // 1040..1049
-#define IDC_PIN_WIN_BASE            1060   // 1060..1069
+#define IDC_POPUP_HK                1040
+#define IDC_POPUP_WIN               1041
+#define IDC_PIN_HK_BASE             1050   // 1050..1059
+#define IDC_PIN_WIN_BASE            1070   // 1070..1079
 
 // Error codes
 #define ERR_COMMON_CONTROLS         1000
