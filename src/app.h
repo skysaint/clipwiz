@@ -24,6 +24,8 @@ public:
     const util::Theme& GetTheme() const override { return theme_; }
     int RowsVisible() const override { return cfg_.rowsVisible; }
     int PopupPosition() const override { return cfg_.popupPosition; }
+    const std::wstring& PopupFontName() const override { return cfg_.fontName; }
+    int PopupFontSize() const override { return cfg_.fontSize; }
     void GetLastPos(int& x, int& y) const override { x = cfg_.lastPopupX; y = cfg_.lastPopupY; }
     void SaveLastPos(int x, int y) override;
     void PasteItem(uint64_t id) override;

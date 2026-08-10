@@ -18,6 +18,8 @@ public:
     virtual const util::Theme& GetTheme() const = 0;
     virtual int RowsVisible() const = 0;
     virtual int PopupPosition() const = 0;  // 0=mouse 1=caret 2=last
+    virtual const std::wstring& PopupFontName() const = 0;
+    virtual int PopupFontSize() const = 0;
     virtual void GetLastPos(int& x, int& y) const = 0;
     virtual void SaveLastPos(int x, int y) = 0;
 

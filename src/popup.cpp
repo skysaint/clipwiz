@@ -51,6 +51,8 @@ struct State {
     int thumbW = 0;
     int hotkeyW = 0;
     int pinW = 0;  // Pin icon reserved width
+    int fontMainH = 0;
+    int fontSmallH = 0;
 
     std::vector<Row> rows;
     int sel = -1;
@@ -78,23 +80,82 @@ State g;
 
 // ---------------- Metrics ----------------
 
+HFONT CreatePopupFont(int pointDelta) {
+    HFONT font = util::CreateUiFont(g.dpi, g.host->PopupFontName(), g.host->PopupFontSize(),
+                                    pointDelta);
+    if (!font) {
+        font = util::CreateUiFont(g.dpi, pointDelta);
+    }
+    return font;
+}
+
+int MeasureFontHeight(HFONT font) {
+    HDC dc = GetDC(g.hwnd);
+    HGDIOBJ old = SelectObject(dc, font);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    ReleaseDC(g.hwnd, dc);
+    return tm.tmHeight;
+}
+
+int MeasureTextWidth(HFONT font, const std::wstring& text) {
+    if (text.empty()) {
+        return 0;
+    }
+    HDC dc = GetDC(g.hwnd);
+    HGDIOBJ old = SelectObject(dc, font);
+    SIZE size{};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    SelectObject(dc, old);
+    ReleaseDC(g.hwnd, dc);
+    return size.cx;
+}
+
+void RecreateFonts() {
+    if (g.font) { DeleteObject(g.font); g.font = nullptr; }
+    if (g.fontSmall) { DeleteObject(g.fontSmall); g.fontSmall = nullptr; }
+    g.font = CreatePopupFont(0);
+    g.fontSmall = CreatePopupFont(-1);
+    if (!g.fontSmall) {
+        g.fontSmall = CreatePopupFont(0);
+    }
+    g.fontMainH = g.font ? MeasureFontHeight(g.font) : util::Scale(16, g.dpi);
+    g.fontSmallH = g.fontSmall ? MeasureFontHeight(g.fontSmall) : g.fontMainH;
+}
+
 void CalcMetrics() {
     g.dpi = util::DpiOf(g.hwnd);
-    g.width = util::Scale(520, g.dpi);
-    g.titleH = util::Scale(26, g.dpi);
-    g.pad = util::Scale(8, g.dpi);
-    g.editH = util::Scale(24, g.dpi);
-    g.rowH = util::Scale(30, g.dpi);
-    g.hintH = util::Scale(18, g.dpi);
-    g.indexW = util::Scale(20, g.dpi);
-    g.thumbW = util::Scale(56, g.dpi);
-    g.hotkeyW = util::Scale(90, g.dpi);
-    g.pinW = util::Scale(14, g.dpi);
+    int titleTextW = MeasureTextWidth(g.font, i18n::T("popup.title"));
+    int hintTextW = MeasureTextWidth(g.fontSmall, i18n::T("popup.hint"));
+    int filterHintW = MeasureTextWidth(g.font, i18n::T("popup.filter_hint"));
+
+    g.pad = std::max(util::Scale(8, g.dpi), g.fontMainH / 2);
+    g.titleH = std::max(util::Scale(26, g.dpi), g.fontMainH + g.pad);
+    g.editH = std::max(util::Scale(24, g.dpi), g.fontMainH + g.pad + util::Scale(2, g.dpi));
+    g.rowH = std::max(util::Scale(30, g.dpi), g.fontMainH + g.pad + util::Scale(6, g.dpi));
+    g.hintH = std::max(util::Scale(18, g.dpi), g.fontSmallH + util::Scale(6, g.dpi));
+    g.indexW = std::max(util::Scale(20, g.dpi),
+                        MeasureTextWidth(g.fontSmall, L"99") + util::Scale(4, g.dpi));
+    g.thumbW = std::max(util::Scale(56, g.dpi), g.rowH + util::Scale(16, g.dpi));
+    g.hotkeyW = std::max(util::Scale(90, g.dpi),
+                         MeasureTextWidth(g.fontSmall, L"Ctrl+Shift+Alt+PgDn") +
+                             util::Scale(12, g.dpi));
+    g.pinW = std::max(util::Scale(14, g.dpi), util::Scale(12, g.dpi));
+    int minTextW = std::max({util::Scale(240, g.dpi), titleTextW + util::Scale(36, g.dpi),
+                             hintTextW + util::Scale(20, g.dpi), filterHintW + util::Scale(20, g.dpi)});
+    g.width = std::max(util::Scale(520, g.dpi),
+                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + g.hotkeyW + minTextW);
 }
 
 int ListTop() { return g.titleH + g.pad + g.editH + g.pad / 2; }
 int ListBottom() {
     return ListTop() + g.rowH * g.host->RowsVisible();
+}
+
+int PopupHeight() {
+    int vis = g.host->RowsVisible();
+    return g.titleH + g.pad + g.editH + g.pad / 2 + g.rowH * vis + g.pad / 2 + g.hintH + g.pad;
 }
 
 RECT ListRect() {
@@ -104,6 +165,26 @@ RECT ListRect() {
     r.right = g.width - g.pad;
     r.bottom = ListBottom();
     return r;
+}
+
+void ApplyPopupFontToControls() {
+    if (g.edit && g.font) {
+        SendMessageW(g.edit, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+    }
+}
+
+void RelayoutWindow() {
+    if (g.edit) {
+        SetWindowPos(g.edit, nullptr, g.pad, g.titleH + g.pad / 2, g.width - g.pad * 2, g.editH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (g.hwnd) {
+        UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
+        if (!IsWindowVisible(g.hwnd)) {
+            flags |= SWP_NOMOVE;
+        }
+        SetWindowPos(g.hwnd, nullptr, 0, 0, g.width, PopupHeight(), flags);
+    }
 }
 
 // ---------------- Thumbnails ----------------
@@ -239,7 +320,7 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     SetBkMode(dc, TRANSPARENT);
 
     // Pin area (uniform width for all rows)
-    int pinSize = util::Scale(9, g.dpi);
+    int pinSize = std::max(util::Scale(9, g.dpi), g.rowH / 3);
     if (row.pinned) {
         COLORREF pinColor = selected ? theme.selFg : theme.accent;
         DrawPinIcon(dc, rc.left + 2, rc.top + g.rowH / 2, pinSize, pinColor);
@@ -317,12 +398,12 @@ void PaintAll(HDC target, const RECT& client) {
     FillRect(mem, &titleRc, titleBrush);
     DeleteObject(titleBrush);
     SetBkMode(mem, TRANSPARENT);
-    SelectObject(mem, g.fontSmall);
+    SelectObject(mem, g.font);
     SetTextColor(mem, theme.fg);
     RECT titleText = {g.pad, 0, client.right - g.titleH, g.titleH};
     DrawTextW(mem, i18n::T("popup.title"), -1, &titleText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     // X button
-    int xSize = util::Scale(12, g.dpi);
+    int xSize = std::max(util::Scale(12, g.dpi), g.titleH / 2);
     int xPad = (g.titleH - xSize) / 2;
     HPEN xPen = CreatePen(PS_SOLID, util::Scale(1, g.dpi), theme.dim);
     HGDIOBJ oldPen = SelectObject(mem, xPen);
@@ -659,8 +740,7 @@ void ShowRowMenu(int index) {
 // ---------------- Positioning ----------------
 
 void PositionWindow() {
-    int vis = g.host->RowsVisible();
-    int h = g.titleH + g.pad + g.editH + g.pad / 2 + g.rowH * vis + g.pad / 2 + g.hintH + g.pad;
+    int h = PopupHeight();
     RECT work;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
 
@@ -696,11 +776,14 @@ void PositionWindow() {
             y = cur.y + 16;
         }
     }
-    // Ensure window stays on screen
-    int maxX = std::max(work.left, work.right - g.width);
-    int maxY = std::max(work.top, work.bottom - h);
-    x = std::clamp(x, static_cast<int>(work.left), maxX);
-    y = std::clamp(y, static_cast<int>(work.top), maxY);
+    // Ensure window stays on screen with at least 8px margin from any edge
+    int margin = util::Scale(8, g.dpi);
+    int minX = static_cast<int>(work.left) + margin;
+    int maxX = std::max(minX, static_cast<int>(work.right) - g.width - margin);
+    int minY = static_cast<int>(work.top) + margin;
+    int maxY = std::max(minY, static_cast<int>(work.bottom) - h - margin);
+    x = std::clamp(x, minX, maxX);
+    y = std::clamp(y, minY, maxY);
 
     SetWindowPos(g.hwnd, HWND_TOPMOST, x, y, g.width, h, SWP_NOACTIVATE);
 }
@@ -746,9 +829,9 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
         case WM_CREATE: {
+            g.dpi = util::DpiOf(hwnd);
+            RecreateFonts();
             CalcMetrics();
-            g.font = util::CreateUiFont(g.dpi, 0);
-            g.fontSmall = util::CreateUiFont(g.dpi, -1);
             return 0;
         }
         case WM_PAINT: {
@@ -927,12 +1010,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_DPICHANGED:
+            g.dpi = HIWORD(wparam);
+            RecreateFonts();
             CalcMetrics();
-            if (g.font) DeleteObject(g.font);
-            if (g.fontSmall) DeleteObject(g.fontSmall);
             if (g.editBg) { DeleteObject(g.editBg); g.editBg = nullptr; }
-            g.font = util::CreateUiFont(g.dpi, 0);
-            g.fontSmall = util::CreateUiFont(g.dpi, -1);
+            ApplyPopupFontToControls();
+            RelayoutWindow();
             for (auto& [id, t] : g.thumbs) {
                 DeleteObject(t.bmp);
             }
@@ -991,16 +1074,16 @@ bool Init(HINSTANCE inst, Host* host) {
         return false;
     }
 
+    g.dpi = util::DpiOf(g.hwnd);
+    RecreateFonts();
     CalcMetrics();
-    g.font = util::CreateUiFont(g.dpi, 0);
-    g.fontSmall = util::CreateUiFont(g.dpi, -1);
 
     // Filter edit box
     g.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                              g.pad, g.titleH + g.pad / 2, g.width - g.pad * 2, g.editH, g.hwnd,
                              nullptr, inst, nullptr);
-    SendMessageW(g.edit, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+    ApplyPopupFontToControls();
     SendMessageW(g.edit, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(i18n::T("popup.filter_hint")));
     g.editOrig = reinterpret_cast<WNDPROC>(
@@ -1079,10 +1162,15 @@ void BeginModal() { ++g.modalDepth; }
 void EndModal() { if (g.modalDepth > 0) --g.modalDepth; }
 
 void OnThemeChanged() {
+    g.dpi = util::DpiOf(g.hwnd);
+    RecreateFonts();
+    CalcMetrics();
     if (g.editBg) {
         DeleteObject(g.editBg);
         g.editBg = nullptr;
     }
+    ApplyPopupFontToControls();
+    RelayoutWindow();
     // Refresh cue banner text (language may have changed)
     if (g.edit) {
         SendMessageW(g.edit, EM_SETCUEBANNER, TRUE,

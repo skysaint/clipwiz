@@ -482,6 +482,7 @@ void Load(Config& cfg) {
     }
     cfg.fontName = Widen(getStr("FontName"));
     cfg.fontSize = getInt("FontSize", 0);
+    cfg.cleanOnExit = getInt("CleanOnExit", 0) != 0;
 }
 
 bool Save(const Config& cfg) {
@@ -498,6 +499,7 @@ bool Save(const Config& cfg) {
     ini += "LastPopupX=" + std::to_string(cfg.lastPopupX) + "\n";
     ini += "LastPopupY=" + std::to_string(cfg.lastPopupY) + "\n";
     ini += "PopupHotkey=" + std::to_string(cfg.popupHotkey) + "\n";
+    ini += "CleanOnExit=" + std::string(cfg.cleanOnExit ? "1" : "0") + "\n";
     for (int i = 0; i < 10; ++i) {
         if (cfg.pinnedHotkeys[i] != 0)
             ini += "PinnedHotkey" + std::to_string(i) + "="

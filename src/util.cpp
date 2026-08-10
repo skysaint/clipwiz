@@ -424,6 +424,31 @@ HFONT CreateUiFont(int dpi, int pointDelta) {
     return CreateFontIndirectW(&lf);
 }
 
+HFONT CreateUiFont(int dpi, const std::wstring& faceName, int pointSize, int pointDelta) {
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0,
+                                    static_cast<UINT>(dpi))) {
+        ncm.cbSize = sizeof(ncm);
+        if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+            return nullptr;
+        }
+        ncm.lfMessageFont.lfHeight = MulDiv(ncm.lfMessageFont.lfHeight, dpi, 96);
+    }
+    LOGFONTW lf = ncm.lfMessageFont;
+    if (!faceName.empty()) {
+        wcsncpy_s(lf.lfFaceName, faceName.c_str(), _TRUNCATE);
+    }
+    if (pointSize > 0) {
+        lf.lfHeight = -MulDiv(pointSize, dpi, 72);
+    }
+    if (pointDelta != 0) {
+        int delta = MulDiv(pointDelta, dpi, 72);
+        lf.lfHeight -= delta;
+    }
+    return CreateFontIndirectW(&lf);
+}
+
 bool SetAutostart(bool enable) {
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER,

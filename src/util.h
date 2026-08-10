@@ -56,6 +56,7 @@ Theme MakeTheme(bool dark);
 int DpiOf(HWND hwnd);
 int Scale(int dip, int dpi);
 HFONT CreateUiFont(int dpi, int pointDelta);
+HFONT CreateUiFont(int dpi, const std::wstring& faceName, int pointSize, int pointDelta);
 
 bool SetAutostart(bool enable);
 bool GetAutostart();
