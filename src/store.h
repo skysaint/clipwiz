@@ -57,6 +57,9 @@ public:
     bool SetPinned(uint64_t id, bool pinned);
     bool Remove(uint64_t id);
     bool Touch(uint64_t id);  // Update usedAt and reorder unpinned section
+    
+    // Clear all non-pinned items (for clean on exit)
+    void ClearNonPinned();
 
     // Pinned item reordering
     bool MovePinned(uint64_t id, int delta);         // Move up/down by delta positions

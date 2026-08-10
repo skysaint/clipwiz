@@ -652,6 +652,15 @@ bool Store::Remove(uint64_t id) {
     return false;
 }
 
+void Store::ClearNonPinned() {
+    // Remove all non-pinned items (start from the end to avoid index shifting)
+    for (int i = static_cast<int>(items_.size()) - 1; i >= 0; --i) {
+        if (!items_[i].pinned) {
+            items_.erase(items_.begin() + i);
+        }
+    }
+}
+
 bool Store::Touch(uint64_t id) {
     Item* item = FindMutable(id);
     if (!item) {

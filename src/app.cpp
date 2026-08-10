@@ -260,6 +260,25 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             writer_.Stop();
             LOG_INFO("Async writer stopped");
             
+            // Clean non-pinned items if configured
+            if (cfg_.cleanOnExit) {
+                LOG_INFO("Cleaning non-pinned items on exit");
+                store_.ClearNonPinned();
+            }
+            
+            // Save final state (important for cleanOnExit)
+            LOG_INFO("Saving final state");
+            store_.ExpireCheck();
+            {
+                std::vector<uint8_t> buf = store_.Serialize();
+                bool saved = util::WriteFileAtomic(util::StorePath(), buf.data(), buf.size());
+                if (saved) {
+                    LOG_INFO("Final state saved successfully");
+                } else {
+                    LOG_ERROR("Failed to save final state");
+                }
+            }
+            
             // Clean up other resources
             clip::StopListening(hwnd);
             paste::RemoveHook();

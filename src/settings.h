@@ -15,6 +15,7 @@ enum class ThemeMode : int { Auto = 0, Light = 1, Dark = 2 };
 struct Config {
     int maxHistory = 50;
     int expiryDays = 0;              // 0 = never expire
+    bool cleanOnExit = false;        // Clean non-pinned items on exit
     uint32_t popupHotkey = 0;        // default Ctrl+Alt+K, see Defaults()
     uint32_t pinnedHotkeys[10] = {}; // positional: hotkey for the Nth pinned item
     int pasteDelayMs = 60;
