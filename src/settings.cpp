@@ -117,7 +117,7 @@ void PopulateControls(HWND hwnd) {
     constexpr int kCheckboxOffsetY = (kEditH - kCheckboxH) / 2;
     constexpr int kWinCheckboxW = 34;
     constexpr int kPinnedHkW = 190;
-    constexpr int kPinnedColW = 275;
+    constexpr int kActionBtnW = 110;
     constexpr int kGroupW = kDlgW - 20;
     constexpr int kFontFieldW = kFieldW + 2;
     constexpr int kFontFieldX = kFieldX - 1;
@@ -202,7 +202,7 @@ void PopulateControls(HWND hwnd) {
                  reinterpret_cast<LPARAM>(i18n::T("settings.data_portable")));
     SendMessageW(cbData, CB_SETCURSEL, util::IsPortable() ? 1 : 0, 0);
     MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.open_dir"),
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kEditH, IDC_DATADIR_OPEN);
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, kActionBtnW, kEditH, IDC_DATADIR_OPEN);
     y += kRowH;
 
     // Display font
@@ -213,7 +213,7 @@ void PopulateControls(HWND hwnd) {
     MakeCtrl(hwnd, L"BUTTON", fontText.c_str(),
              BS_PUSHBUTTON | WS_TABSTOP, kFontFieldX, y, kFontFieldW, kEditH, IDC_FONT_BTN);
     MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.font_default"),
-             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, 80, kEditH, IDC_FONT_RESET);
+             BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, kActionBtnW, kEditH, IDC_FONT_RESET);
     y += kRowH + 8;
 
     // ===================== Section 2: Shortcuts =====================
@@ -235,10 +235,14 @@ void PopulateControls(HWND hwnd) {
     y += 20;
 
     // 10 pinned hotkeys in 2 columns (5 per column)
+    constexpr int kPinnedGroupW = 22 + kPinnedHkW + 6 + kWinCheckboxW;
+    constexpr int kPinnedCol1X = kPad;
+    constexpr int kPinnedVisualCompensation = 8;
+    constexpr int kPinnedCol2X = kDlgW - kPad - kPinnedGroupW - kPinnedVisualCompensation;
     for (int i = 0; i < 10; ++i) {
         int col = i / 5;
         int row = i % 5;
-        int cx = kPad + col * kPinnedColW;
+        int cx = (col == 0) ? kPinnedCol1X : kPinnedCol2X;
         int cy = y + row * kHkRowH;
 
         std::wstring numLabel = util::Format(L"%d:", i + 1);
@@ -342,14 +346,25 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 cf.lStructSize = sizeof(cf);
                 cf.hwndOwner = hwnd;
                 cf.lpLogFont = &lf;
-                cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST;
-                if (ChooseFontW(&cf)) {
-                    g_cfg->fontName = lf.lfFaceName;
-                    g_cfg->fontSize = cf.iPointSize / 10;
-                    std::wstring t = util::Format(L"%s  %dpt",
-                                                  g_cfg->fontName.c_str(), g_cfg->fontSize);
-                    SetDlgItemTextW(hwnd, IDC_FONT_BTN, t.c_str());
+                constexpr int kFontMinPt = 8;
+                constexpr int kFontMaxPt = 28;
+                cf.nSizeMin = kFontMinPt;
+                cf.nSizeMax = kFontMaxPt;
+                cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST
+                         | CF_LIMITSIZE | CF_TTONLY | CF_NOVERTFONTS;
+                for (;;) {
+                    if (!ChooseFontW(&cf)) return TRUE;
+                    if (lf.lfFaceName[0] != L'@') break;
+                    MessageBoxW(hwnd,
+                        i18n::T("msg.font_vertical_unsupported"),
+                        i18n::T("msg.font_selection_title"),
+                        MB_OK | MB_ICONEXCLAMATION);
                 }
+                g_cfg->fontName = lf.lfFaceName;
+                g_cfg->fontSize = cf.iPointSize / 10;
+                std::wstring t = util::Format(L"%s  %dpt",
+                                              g_cfg->fontName.c_str(), g_cfg->fontSize);
+                SetDlgItemTextW(hwnd, IDC_FONT_BTN, t.c_str());
                 return TRUE;
             }
             if (id == IDC_FONT_RESET) {
@@ -430,6 +445,8 @@ void Clamp(Config& cfg) {
     if (cfg.maxTextBytes > 64u * 1024u * 1024u) cfg.maxTextBytes = 64u * 1024u * 1024u;
     if (cfg.maxImagePixels < 65536u) cfg.maxImagePixels = 65536u;
     cfg.largeItemThresholdMB = std::clamp(cfg.largeItemThresholdMB, 1, 500);
+    if (cfg.fontSize > 0) cfg.fontSize = std::clamp(cfg.fontSize, 8, 28);
+    if (!cfg.fontName.empty() && cfg.fontName.front() == L'@') cfg.fontName.erase(cfg.fontName.begin());
 }
 
 void Load(Config& cfg) {

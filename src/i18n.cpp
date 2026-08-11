@@ -122,6 +122,9 @@ const Entry kDefaults[] = {
     {"msg.risky_alt_tab", L"Alt+Tab is used by Windows to switch windows. It cannot be registered."},
     {"msg.large_data",
      L"Clipboard data has grown very large. Clean up large non-pinned items now?"},
+    {"msg.font_selection_title", L"Font selection"},
+    {"msg.font_vertical_unsupported",
+     L"Vertical (@) fonts are not supported. Please choose another font."},
 
     // Preview
     {"preview.image", L"[Image %u\x00D7%u]"},

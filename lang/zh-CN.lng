@@ -89,6 +89,8 @@ msg.risky_ctrl_num=%s 与浏览器/编辑器的切换标签页快捷键冲突，
 msg.risky_ctrl_edit=这是系统通用的编辑快捷键，占用后会影响所有程序，建议换一个。
 msg.risky_alt_tab=Alt+Tab 是系统切换窗口用的，注册不上。
 msg.large_data=剪贴板数据已经很大了，是否清理掉非置顶的大条目？
+msg.font_selection_title=选择字体
+msg.font_vertical_unsupported=不支持竖排（@开头）字体，请换一个。
 
 # 预览
 preview.image=[图片 %u×%u]
