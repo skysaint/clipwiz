@@ -48,5 +48,22 @@ void EndModal();
 
 void OnThemeChanged();
 void OnDataChanged();
+void OnSettingsChanged();
+
+struct RuntimeState {
+    HWND hwnd = nullptr;
+    int visible = 0;   // 0/1 safe int read
+    int modalDepth = 0;
+    int reorderDrag = 0;
+    int rowsCount = 0;
+    int widthDip = 0;
+    int heightDip = 0;
+    int dpi = 0;
+    int lastSelRow = -1;
+    int pinnedCount = -1;
+};
+
+// Best-effort, side-effect-free snapshot of internal state for crash diagnostics.
+void SnapshotState(RuntimeState& out);
 
 }  // namespace popup

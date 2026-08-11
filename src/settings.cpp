@@ -22,23 +22,9 @@
 namespace settings {
 namespace {
 
-std::string Narrow(const std::wstring& ws) {
-    if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0,
-                                nullptr, nullptr);
-    std::string s(static_cast<size_t>(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), s.data(), n, nullptr,
-                        nullptr);
-    return s;
-}
-
-std::wstring Widen(const std::string& s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring ws(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), ws.data(), n);
-    return ws;
-}
+// Settings-local aliases (no need to duplicate util conversions)
+using util::Narrow;
+using util::Widen;
 
 // Dialog state
 Config* g_cfg = nullptr;
@@ -432,6 +418,7 @@ Config Defaults() {
     cfg.pinnedHotkeys[0] = hotkey::Make(MOD_CONTROL | MOD_ALT, '1');
     cfg.pinnedHotkeys[1] = hotkey::Make(MOD_CONTROL | MOD_ALT, '2');
     cfg.expiryDays = 5;
+    cfg.logLevel = L"error";
     return cfg;
 }
 
@@ -500,6 +487,7 @@ void Load(Config& cfg) {
     cfg.fontName = Widen(getStr("FontName"));
     cfg.fontSize = getInt("FontSize", 0);
     cfg.cleanOnExit = getInt("CleanOnExit", 0) != 0;
+    cfg.logLevel = Widen(getStr("LogLevel"));
 }
 
 bool Save(const Config& cfg) {
@@ -525,6 +513,7 @@ bool Save(const Config& cfg) {
     if (!cfg.language.empty()) ini += "Language=" + Narrow(cfg.language) + "\n";
     if (cfg.fontSize > 0) ini += "FontSize=" + std::to_string(cfg.fontSize) + "\n";
     if (!cfg.fontName.empty()) ini += "FontName=" + Narrow(cfg.fontName) + "\n";
+    if (!cfg.logLevel.empty()) ini += "LogLevel=" + Narrow(cfg.logLevel) + "\n";
     return util::WriteFileAtomic(util::ConfigPath(), ini.data(), ini.size());
 }
 

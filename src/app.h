@@ -35,6 +35,13 @@ public:
     void MovePinned(uint64_t id, int delta) override;
     void OpenSettings() override;
 
+    // Snapshot read-only state for crash diagnostics.
+    void DumpConfigForCrash(int& maxHistory, int& expiryDays, int& popupHotkey,
+                            int& rowsVisible, int& popupPosition, int& fontSize,
+                            std::string& logLevelUtf8,
+                            int& storeCount, int& storePinned, int& storeHistory,
+                            uint64_t& storeTotalBytes) const;
+
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);

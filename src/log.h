@@ -2,19 +2,29 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace logger {
 
 enum class Level : uint8_t {
-    Debug = 0,
-    Info = 1,
-    Warning = 2,
-    Error = 3
+    Off = 0,
+    Debug = 1,
+    Info = 2,
+    Warning = 3,
+    Error = 4
 };
 
 // Initialize the logging system (call at program startup)
 // Log file located in data directory, filename: clipwiz.log
 void Init();
+
+// Set minimum log level at runtime. Default is Error (only warnings and above are off).
+void SetMinLevel(Level level);
+Level GetMinLevel();
+
+// Parse a level name like "off","debug","info","warning","error" (case-insensitive)
+// Returns Level::Error on unknown names.
+Level ParseLevel(const std::string& name);
 
 // Write log entry
 void Write(Level level, const char* file, int line, const char* fmt, ...);

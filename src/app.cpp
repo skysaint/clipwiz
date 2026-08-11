@@ -42,6 +42,10 @@ bool App::Init(HINSTANCE inst) {
     settings::Load(cfg_);
     settings::Clamp(cfg_);
 
+    // Apply configured log level (default Error if unset/invalid)
+    logger::SetMinLevel(logger::ParseLevel(cfg_.logLevel.empty() ? "error"
+                                          : util::Narrow(cfg_.logLevel)));
+
     // Data directory is auto-detected (portable vs installed)
     // No manual override needed
 
@@ -514,6 +518,24 @@ void App::SaveLastPos(int x, int y) {
     settings::Save(cfg_);
 }
 
+void App::DumpConfigForCrash(int& maxHistory, int& expiryDays, int& popupHotkey,
+                             int& rowsVisible, int& popupPosition, int& fontSize,
+                             std::string& logLevelUtf8,
+                             int& storeCount, int& storePinned, int& storeHistory,
+                             uint64_t& storeTotalBytes) const {
+    maxHistory = cfg_.maxHistory;
+    expiryDays = cfg_.expiryDays;
+    popupHotkey = static_cast<int>(cfg_.popupHotkey);
+    rowsVisible = cfg_.rowsVisible;
+    popupPosition = cfg_.popupPosition;
+    fontSize = cfg_.fontSize;
+    logLevelUtf8 = util::Narrow(cfg_.logLevel);
+    storeCount = static_cast<int>(store_.Items().size());
+    storePinned = store_.PinnedCount();
+    storeHistory = store_.HistoryCount();
+    storeTotalBytes = store_.TotalDataSize();
+}
+
 void App::OpenSettings() {
     if (settingsOpen_) {
         settings::ActivateExisting();
@@ -556,8 +578,11 @@ void App::ApplyConfig() {
     ApplyTheme();
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
     i18n::Init(cfg_.language);
+    logger::SetMinLevel(logger::ParseLevel(cfg_.logLevel.empty() ? "error"
+                                          : util::Narrow(cfg_.logLevel)));
     popup::OnThemeChanged();
     popup::OnDataChanged();
+    popup::OnSettingsChanged();
 }
 
 void App::RegisterAllHotkeys(bool reportFailures) {

@@ -11,13 +11,14 @@ namespace {
 
 FILE* g_file = nullptr;
 CRITICAL_SECTION g_cs;
-Level g_minLevel = Level::Info;
+Level g_minLevel = Level::Error;
 bool g_inited = false;
 
 constexpr int64_t kMaxLogBytes = 1024 * 1024;  // 1 MB
 
 const char* LevelStr(Level level) {
     switch (level) {
+        case Level::Off:     return "OFF  ";
         case Level::Debug:   return "DEBUG";
         case Level::Info:    return "INFO ";
         case Level::Warning: return "WARN ";
@@ -44,6 +45,35 @@ void WriteToFile(const char* line) {
 }
 
 }  // namespace
+
+void SetMinLevel(Level level) {
+    EnterCriticalSection(&g_cs);
+    g_minLevel = level;
+    LeaveCriticalSection(&g_cs);
+}
+
+Level GetMinLevel() {
+    Level out = Level::Error;
+    EnterCriticalSection(&g_cs);
+    out = g_minLevel;
+    LeaveCriticalSection(&g_cs);
+    return out;
+}
+
+Level ParseLevel(const std::string& name) {
+    std::string s;
+    s.reserve(name.size());
+    for (char c : name) {
+        if (c >= 'A' && c <= 'Z') s.push_back(static_cast<char>(c + ('a' - 'A')));
+        else s.push_back(c);
+    }
+    if (s == "off") return Level::Off;
+    if (s == "debug") return Level::Debug;
+    if (s == "info") return Level::Info;
+    if (s == "warn" || s == "warning") return Level::Warning;
+    if (s == "err" || s == "error") return Level::Error;
+    return Level::Error;
+}
 
 void Init() {
     if (g_inited) return;
@@ -73,7 +103,9 @@ void Init() {
 }
 
 void Write(Level level, const char* file, int line, const char* fmt, ...) {
-    if (!g_inited || level < g_minLevel) return;
+    if (!g_inited) return;
+    Level minLevel = GetMinLevel();
+    if (minLevel == Level::Off || level < minLevel) return;
 
     char timeBuf[32];
     FormatTime(timeBuf, sizeof(timeBuf));

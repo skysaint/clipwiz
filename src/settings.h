@@ -30,6 +30,7 @@ struct Config {
     uint32_t maxTextBytes = 1024u * 1024u;
     uint32_t maxImagePixels = 33177600u;
     int largeItemThresholdMB = 10;  // threshold for large-item cleanup
+    std::wstring logLevel;           // empty = default error
 };
 
 Config Defaults();

@@ -714,6 +714,7 @@ void ShowRowMenu(int index) {
         return;
     }
     const Row& row = g.rows[static_cast<size_t>(index)];
+    uint64_t rowId = row.id;
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, i18n::T("popup.menu.copy"));
     AppendMenuW(menu, MF_STRING, 2, i18n::T("popup.menu.paste"));
@@ -724,15 +725,26 @@ void ShowRowMenu(int index) {
 
     POINT pt;
     GetCursorPos(&pt);
-    int cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0,
-                             g.hwnd, nullptr);
+    // Mark menu as modal so WM_ACTIVATE(INACTIVE) does not hide the popup
+    // out from under TrackPopupMenu (which itself temporarily deactivates it).
+    BeginModal();
+    int cmd = TrackPopupMenu(menu,
+                             TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RECURSE,
+                             pt.x, pt.y, 0, g.hwnd, nullptr);
+    EndModal();
     DestroyMenu(menu);
 
+    // Validate that the target item still exists in the same store after
+    // the menu closes (data could have been refreshed by another path).
+    const Item* item = (rowId != 0) ? g.host->GetStore().Find(rowId) : nullptr;
+    if (!item) {
+        return;
+    }
     switch (cmd) {
-        case 1: g.host->CopyItem(row.id); break;
-        case 2: g.host->PasteItem(row.id); break;
-        case 3: g.host->TogglePin(row.id); break;
-        case 4: g.host->DeleteItem(row.id); break;
+        case 1: g.host->CopyItem(rowId); break;
+        case 2: g.host->PasteItem(rowId); break;
+        case 3: g.host->TogglePin(rowId); break;
+        case 4: g.host->DeleteItem(rowId); break;
         default: break;
     }
 }
@@ -1100,6 +1112,21 @@ void Shutdown() {
 }
 
 void Show() {
+    if (!g.hwnd || !g.host) {
+        return;
+    }
+    // Reset any stale modal/drag/preview state first.
+    if (g.modalDepth > 0) {
+        g.modalDepth = 0;
+    }
+    if (g.reorderDrag) {
+        g.reorderDrag = false;
+        g.reorderFrom = -1;
+        g.reorderInsert = -1;
+        ReleaseCapture();
+    }
+    HidePreview();
+
     Rebuild();
     PositionWindow();
     SetWindowPos(g.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
@@ -1113,7 +1140,9 @@ void Show() {
         attached = AttachThreadInput(myThread, fgThread, TRUE) != FALSE;
     }
     SetForegroundWindow(g.hwnd);
-    SetFocus(g.edit);
+    if (g.edit && IsWindow(g.edit)) {
+        SetFocus(g.edit);
+    }
     if (attached) {
         AttachThreadInput(myThread, fgThread, FALSE);
     }
@@ -1184,6 +1213,31 @@ void OnDataChanged() {
         Rebuild();
         Redraw();
     }
+}
+
+void OnSettingsChanged() {
+    // Font name / size and similar popup-affecting settings may have changed.
+    RecreateFonts();
+    CalcMetrics();
+    ApplyPopupFontToControls();
+    if (IsWindowVisible(g.hwnd)) {
+        RelayoutWindow();
+        Redraw();
+    }
+}
+
+void SnapshotState(RuntimeState& out) {
+    out = RuntimeState{};
+    out.hwnd = g.hwnd;
+    out.visible = (g.hwnd && IsWindowVisible(g.hwnd)) ? 1 : 0;
+    out.modalDepth = g.modalDepth;
+    out.reorderDrag = g.reorderDrag ? 1 : 0;
+    out.rowsCount = static_cast<int>(g.rows.size());
+    out.widthDip = g.width;
+    out.heightDip = g.hwnd ? PopupHeight() : 0;
+    out.dpi = static_cast<int>(g.dpi);
+    out.lastSelRow = g.sel;
+    out.pinnedCount = g.host ? g.host->GetStore().PinnedCount() : -1;
 }
 
 }  // namespace popup

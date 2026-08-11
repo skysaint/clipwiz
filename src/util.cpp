@@ -359,6 +359,26 @@ std::wstring OneLinePreview(const std::wstring& text, size_t maxLen) {
     return out;
 }
 
+std::wstring Widen(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring ws(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), ws.data(), n);
+    return ws;
+}
+
+std::string Narrow(const std::wstring& ws) {
+    if (ws.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0,
+                                nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), s.data(), n, nullptr,
+                        nullptr);
+    return s;
+}
+
 bool IsSystemDarkMode() {
     DWORD value = 1;
     DWORD size = sizeof(value);

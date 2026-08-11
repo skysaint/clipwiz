@@ -50,6 +50,9 @@ std::wstring Format(const wchar_t* fmt, ...);
 // Compress multi-line text to a one-line summary, control chars to spaces, truncate if too long
 std::wstring OneLinePreview(const std::wstring& text, size_t maxLen);
 
+std::wstring Widen(const std::string& utf8);
+std::string Narrow(const std::wstring& ws);
+
 bool IsSystemDarkMode();
 Theme MakeTheme(bool dark);
 

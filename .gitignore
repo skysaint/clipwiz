@@ -1,5 +1,6 @@
 # 构建产物
 build/
+build-debug/
 
 # 运行时数据（如果在本目录调试）
 data/
