@@ -3,6 +3,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <ctime>
 
 #include "util.h"
 
@@ -23,19 +24,20 @@ const char* LevelStr(Level level) {
         case Level::Info:    return "INFO ";
         case Level::Warning: return "WARN ";
         case Level::Error:   return "ERROR";
-        default:             return "?????";
+        default:             return "INFO ";
     }
 }
 
-// Format current time as "HH:MM:SS.mmm"
+// Format current local time as "yyyy-MM-dd HH:mm:ss.fff"
 void FormatTime(char* buf, size_t bufSize) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    _snprintf_s(buf, bufSize, _TRUNCATE, "%02d:%02d:%02d.%03d",
+    _snprintf_s(buf, bufSize, _TRUNCATE, "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                st.wYear, st.wMonth, st.wDay,
                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 }
 
-void WriteToFile(const char* line) {
+void WriteRawLine(const char* line) {
     EnterCriticalSection(&g_cs);
     if (g_file) {
         fprintf(g_file, "%s\n", line);
@@ -91,15 +93,13 @@ void Init() {
     FILE* f = _wfsopen(logPath.c_str(), L"a", _SH_DENYNO);
     if (f) {
         g_file = f;
-        // Startup marker
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        fprintf(g_file, "\n=== ClipWiz started %04d-%02d-%02d %02d:%02d:%02d ===\n",
-                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        fflush(g_file);
     }
 
     g_inited = true;
+
+    // Startup marker (level Warning so default Error min level drops it;
+    // set min level to Warning or below to see startup timestamps).
+    Write(Level::Warning, "log.cpp", static_cast<int>(__LINE__), "ClipWiz started");
 }
 
 void Write(Level level, const char* file, int line, const char* fmt, ...) {
@@ -107,7 +107,7 @@ void Write(Level level, const char* file, int line, const char* fmt, ...) {
     Level minLevel = GetMinLevel();
     if (minLevel == Level::Off || level < minLevel) return;
 
-    char timeBuf[32];
+    char timeBuf[40];
     FormatTime(timeBuf, sizeof(timeBuf));
 
     // Strip path, keep filename only
@@ -116,25 +116,27 @@ void Write(Level level, const char* file, int line, const char* fmt, ...) {
         if (*p == '/' || *p == '\\') baseName = p + 1;
     }
 
-    char msgBuf[512];
+    char msgBuf[2048];
     va_list args;
     va_start(args, fmt);
     vsnprintf_s(msgBuf, sizeof(msgBuf), _TRUNCATE, fmt, args);
     va_end(args);
 
-    char lineBuf[1024];
+    char lineBuf[4096];
     _snprintf_s(lineBuf, sizeof(lineBuf), _TRUNCATE, "[%s] [%s] [%s:%d] %s",
                 timeBuf, LevelStr(level), baseName, line, msgBuf);
 
-    WriteToFile(lineBuf);
+    WriteRawLine(lineBuf);
 }
 
 void Shutdown() {
+    // Shutdown marker before closing the file
+    Write(Level::Warning, "log.cpp", static_cast<int>(__LINE__), "ClipWiz shutdown");
+
     if (!g_inited) return;
 
     EnterCriticalSection(&g_cs);
     if (g_file) {
-        fprintf(g_file, "=== ClipWiz shutdown ===\n");
         fclose(g_file);
         g_file = nullptr;
     }

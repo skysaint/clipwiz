@@ -729,7 +729,7 @@ void ShowRowMenu(int index) {
     // out from under TrackPopupMenu (which itself temporarily deactivates it).
     BeginModal();
     int cmd = TrackPopupMenu(menu,
-                             TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_RECURSE,
+                             TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                              pt.x, pt.y, 0, g.hwnd, nullptr);
     EndModal();
     DestroyMenu(menu);

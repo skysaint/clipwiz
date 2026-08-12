@@ -3,12 +3,16 @@
 #include <commctrl.h>
 #include <objbase.h>
 #include <csignal>
+#include <dbghelp.h>
+#include <time.h>
 
 #include "app.h"
 #include "log.h"
 #include "popup.h"
 #include "resource.h"
 #include "util.h"
+
+#pragma comment(lib, "dbghelp.lib")
 
 namespace {
 
@@ -39,6 +43,51 @@ void RecordLastMsg(const MSG& m) {
     g_lastMsg.hwnd = m.hwnd;
     g_lastMsg.tick = GetTickCount();
 }
+
+// Write a time-prefixed mini-dump alongside clipwiz.log. Best-effort only.
+bool WriteMiniDump(EXCEPTION_POINTERS* ep, const char* tag) {
+    if (!ep) return false;
+
+    std::wstring dir = util::DataDir();
+    util::EnsureDir(dir);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t fname[128];
+    _snwprintf_s(fname, _TRUNCATE,
+                 L"%s\\clipwiz-crash-%04d%02d%02d-%02d%02d%02d-%03d-%s.dmp",
+                 dir.c_str(),
+                 st.wYear, st.wMonth, st.wDay,
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                 (tag && tag[0]) ? util::Widen(tag).c_str() : L"crash");
+
+    HANDLE file = CreateFileW(fname, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION mei;
+    mei.ThreadId = GetCurrentThreadId();
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers = FALSE;
+
+    const DWORD flags = MiniDumpWithDataSegs | MiniDumpWithHandleData |
+                        MiniDumpWithIndirectlyReferencedMemory |
+                        MiniDumpScanMemory | MiniDumpWithProcessThreadData |
+                        MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules;
+
+    BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+                                file, static_cast<MINIDUMP_TYPE>(flags),
+                                &mei, nullptr, nullptr);
+    CloseHandle(file);
+    if (!ok) {
+        DeleteFileW(fname);
+        return false;
+    }
+    return true;
+}
+
 
 const char* MessageNameHint(UINT msg) {
     switch (msg) {
@@ -171,6 +220,7 @@ bool HandOffToRunningInstance() {
 
 // Top-level crash handler: log exception info before process dies
 LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
+    bool dumped = WriteMiniDump(ep, "CRASH");
     if (ep && ep->ExceptionRecord) {
         DWORD code = ep->ExceptionRecord->ExceptionCode;
         ULONG_PTR info[2] = {0, 0};
@@ -183,35 +233,35 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
             case EXCEPTION_ACCESS_VIOLATION:
                 extra = (info[0] == 0) ? L" read" : (info[0] == 1 ? L" write" : L" execute");
                 LOG_ERROR(
-                    "CRASH: ACCESS_VIOLATION ip=0x%p%s addr=0x%p flags=0x%X",
+                    "CRASH: ACCESS_VIOLATION ip=0x%p%s addr=0x%p flags=0x%X dump=%d",
                     ep->ExceptionRecord->ExceptionAddress, extra,
                     reinterpret_cast<void*>(info[1]),
-                    ep->ExceptionRecord->ExceptionFlags);
+                    ep->ExceptionRecord->ExceptionFlags, static_cast<int>(dumped));
                 break;
             case EXCEPTION_STACK_OVERFLOW:
-                LOG_ERROR("CRASH: STACK_OVERFLOW ip=0x%p flags=0x%X",
+                LOG_ERROR("CRASH: STACK_OVERFLOW ip=0x%p flags=0x%X dump=%d",
                           ep->ExceptionRecord->ExceptionAddress,
-                          ep->ExceptionRecord->ExceptionFlags);
+                          ep->ExceptionRecord->ExceptionFlags, static_cast<int>(dumped));
                 break;
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
-                LOG_ERROR("CRASH: DIVIDE_BY_ZERO ip=0x%p flags=0x%X",
+                LOG_ERROR("CRASH: DIVIDE_BY_ZERO ip=0x%p flags=0x%X dump=%d",
                           ep->ExceptionRecord->ExceptionAddress,
-                          ep->ExceptionRecord->ExceptionFlags);
+                          ep->ExceptionRecord->ExceptionFlags, static_cast<int>(dumped));
                 break;
             case 0xE0000001:
             case 0xE06D7363:
-                LOG_ERROR("CRASH: HEAP/CPP-EXCEPTION code=0x%08X ip=0x%p flags=0x%X",
+                LOG_ERROR("CRASH: HEAP/CPP-EXCEPTION code=0x%08X ip=0x%p flags=0x%X dump=%d",
                           code, ep->ExceptionRecord->ExceptionAddress,
-                          ep->ExceptionRecord->ExceptionFlags);
+                          ep->ExceptionRecord->ExceptionFlags, static_cast<int>(dumped));
                 break;
             default:
-                LOG_ERROR("CRASH: code=0x%08X ip=0x%p flags=0x%X",
+                LOG_ERROR("CRASH: code=0x%08X ip=0x%p flags=0x%X dump=%d",
                           code, ep->ExceptionRecord->ExceptionAddress,
-                          ep->ExceptionRecord->ExceptionFlags);
+                          ep->ExceptionRecord->ExceptionFlags, static_cast<int>(dumped));
                 break;
         }
     } else {
-        LOG_ERROR("CRASH: unknown exception (no ExceptionRecord)");
+        LOG_ERROR("CRASH: unknown exception (no ExceptionRecord) dump=%d", static_cast<int>(dumped));
     }
     EmitCrashSnapshot("CRASH");
     logger::Shutdown();
@@ -225,6 +275,7 @@ LONG WINAPI VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
         DWORD code = ep->ExceptionRecord->ExceptionCode;
         if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_STACK_OVERFLOW ||
             code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == 0xE0000001 /*heap corruption*/) {
+            bool dumped = WriteMiniDump(ep, "VEH");
             ULONG_PTR info[2] = {0, 0};
             if (ep->ExceptionRecord->NumberParameters >= 2) {
                 info[0] = ep->ExceptionRecord->ExceptionInformation[0];
@@ -232,12 +283,12 @@ LONG WINAPI VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
             }
             if (code == EXCEPTION_ACCESS_VIOLATION) {
                 const wchar_t* extra = (info[0] == 0) ? L" read" : (info[0] == 1 ? L" write" : L" execute");
-                LOG_ERROR("VEH-CRASH: ACCESS_VIOLATION ip=0x%p%s addr=0x%p",
+                LOG_ERROR("VEH-CRASH: ACCESS_VIOLATION ip=0x%p%s addr=0x%p dump=%d",
                           ep->ExceptionRecord->ExceptionAddress, extra,
-                          reinterpret_cast<void*>(info[1]));
+                          reinterpret_cast<void*>(info[1]), static_cast<int>(dumped));
             } else {
-                LOG_ERROR("VEH-CRASH: code=0x%08X ip=0x%p", code,
-                          ep->ExceptionRecord->ExceptionAddress);
+                LOG_ERROR("VEH-CRASH: code=0x%08X ip=0x%p dump=%d", code,
+                          ep->ExceptionRecord->ExceptionAddress, static_cast<int>(dumped));
             }
             EmitCrashSnapshot("VEH");
             logger::Shutdown();
