@@ -43,13 +43,12 @@ echo   [2] Build      - Release build
 echo   [3] Debug      - Debug build
 echo   [4] Rebuild    - Clean + Release build
 echo   [5] Clean      - Remove build directory
-echo   [6] Run        - Run Release exe
 echo   [0] Exit
 echo.
 
 :PROMPT
 set "choice="
-set /p "choice=  Select (0-6): "
+set /p "choice=  Select (0-5): "
 if "!choice!"=="" goto :PROMPT
 
 if "!choice!"=="1" goto :DO_INIT
@@ -57,7 +56,6 @@ if "!choice!"=="2" goto :DO_BUILD
 if "!choice!"=="3" goto :DO_DEBUG
 if "!choice!"=="4" goto :DO_REBUILD
 if "!choice!"=="5" goto :DO_CLEAN
-if "!choice!"=="6" goto :DO_RUN
 if "!choice!"=="0" exit /b 0
 goto :PROMPT
 
@@ -229,25 +227,6 @@ pause
 goto :MENU_START
 
 :: ============================================================
-:: Run
-:: ============================================================
-:DO_RUN
-if not exist build\Release\clipwiz.exe (
-    echo.
-    echo  [Run] build\Release\clipwiz.exe not found. Build first.
-    if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
-    pause
-    goto :MENU_START
-)
-echo.
-echo  [Run] Starting build\Release\clipwiz.exe ...
-start "" "build\Release\clipwiz.exe"
-echo  [Run] Launched.
-if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
-pause
-goto :MENU_START
-
-:: ============================================================
 :: CLI dispatch
 :: ============================================================
 :CLI_DISPATCH
@@ -256,7 +235,6 @@ if /i "%~1"=="build"      goto :DO_BUILD
 if /i "%~1"=="debug"      goto :DO_DEBUG
 if /i "%~1"=="rebuild"    goto :DO_REBUILD
 if /i "%~1"=="clean"      goto :DO_CLEAN
-if /i "%~1"=="run"        goto :DO_RUN
 goto :USAGE
 
 :: ============================================================
@@ -272,7 +250,6 @@ echo    build      Build Release
 echo    debug      Build Debug
 echo    rebuild    Clean + Release build
 echo    clean      Remove build directory
-echo    run        Launch Release exe
 echo.
 echo  No arguments + double-click = interactive menu.
 echo.
