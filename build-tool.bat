@@ -7,17 +7,39 @@ cd /d "%~dp0"
 :: ============================================================
 :: Detect: double-click (explorer) vs command-line (cmd/pwsh)
 ::
-:: %cmdcmdline% heuristics fail when invoked from PowerShell,
-:: because pwsh also runs .bat via `cmd.exe /c "...\file.bat""`,
-:: matching the same pattern explorer.exe uses. 100% reliable
-:: method: ask the OS for the parent process name. If the
-:: immediate parent is explorer.exe -> real double click,
-:: otherwise (cmd.exe, powershell.exe, pwsh, any other shell)
-:: -> command line invocation.
+:: Two stages, strictly ordered:
+::   Stage 1 — lightweight pure-cmd heuristic (zero external calls)
+::     cmdcmdline has "/c"     AND     %~0 == absolute full path
+::     -> likely double-click or pwsh; proceed to stage 2.
+::     Otherwise -> definitely interactive cmd.exe shell -> CLI.
+::
+::   Stage 2 — climb 6 levels of parent process, but only the
+::     slots that belong to the cmd.exe that owns this .bat.
+::     PowerShell [0] -> bat's cmd.exe [1] -> REAL caller [2..4]
+::     If any of [1..3] equals explorer.exe        -> real double-click
+::     If any of [1..3] equals pwsh / powershell /
+::                    WindowsTerminal / conhost    -> CLI invocation
+::     Fallback (probe failed, unexpected chain)   -> assume DC so
+::                                                      window stays.
 :: ============================================================
 set "double_clicked=false"
-powershell -NoProfile -NonInteractive -Command "$pi = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\"; $pp = Get-Process -Id $pi.ParentProcessId -ErrorAction SilentlyContinue; if ($pp -and $pp.ProcessName -eq 'explorer') { exit 0 } else { exit 1 }"
-if %errorlevel%==0 set "double_clicked=true"
+
+set "_has_slash_c=0"
+set "_s=!cmdcmdline!"
+if not "!_s!"=="!_s:/c=!" set "_has_slash_c=1"
+set "_s="
+
+set "_arg0_abs=0"
+if "%~0"=="%~dpnx0" set "_arg0_abs=1"
+
+if not "!_has_slash_c!!_arg0_abs!"=="11" goto STAGE2_DONE
+call :PROBE_PARENT_CHAIN
+set "_probe_rc=%errorlevel%"
+if "!_probe_rc!"=="0" set "double_clicked=true"
+set "_probe_rc="
+:STAGE2_DONE
+set "_has_slash_c="
+set "_arg0_abs="
 
 :: CLI mode: no args + shell invocation = usage; with args = dispatch
 if "%~1"=="" (
@@ -256,3 +278,38 @@ echo  No arguments + double-click from explorer = interactive menu.
 echo  No arguments + cmd/PowerShell invocation   = show this help.
 echo.
 exit /b 1
+
+:: ============================================================
+:: Probe helper.  Caller must ensure Stage 1 already passed
+:: (!_has_slash_c! AND !_arg0_abs! both 1).  exit 0 = DC found,
+:: exit 1 = CLI shell (pwsh / cmd / terminal).  Fallback when
+:: the chain looks weird / probe fails = exit 0 (assume DC so
+:: the window never silently closes).
+:: ============================================================
+:PROBE_PARENT_CHAIN
+set "_ps1=%temp%\cw_build_%random%_%random%.ps1"
+> "%_ps1%" echo $id = $PID
+>>"%_ps1%" echo for ($i=0; $i -lt 6; $i++) {
+>>"%_ps1%" echo   $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $id) -ErrorAction SilentlyContinue
+>>"%_ps1%" echo   if (-not $p) { break }
+>>"%_ps1%" echo   $n = $p.Name
+>>"%_ps1%" echo   if ($i -ge 1 -and $i -le 3) {
+>>"%_ps1%" echo     if ($n -ieq 'explorer.exe') { Write-Output 'DC'; exit 0 }
+>>"%_ps1%" echo     if ($n -ieq 'cmd.exe') { } else {
+>>"%_ps1%" echo       if ($n -ieq 'powershell.exe' -or $n -ieq 'pwsh.exe' -or $n -ieq 'WindowsTerminal.exe' -or $n -ieq 'conhost.exe') { Write-Output 'PS'; exit 0 }
+>>"%_ps1%" echo     }
+>>"%_ps1%" echo   }
+>>"%_ps1%" echo   $pp = [int]$p.ParentProcessId
+>>"%_ps1%" echo   if ($pp -le 0) { break }
+>>"%_ps1%" echo   $id = $pp
+>>"%_ps1%" echo }
+>>"%_ps1%" echo Write-Output 'DC'
+
+set "_r=PS"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%_ps1%" 2^>nul`) do set "_r=%%I"
+set "_ec=1"
+if /i "%_r%"=="DC" set "_ec=0"
+set "_r="
+del /q "%_ps1%" 2>nul
+set "_ps1="
+exit /b %_ec%
