@@ -5,20 +5,21 @@ title ClipWiz Build Tool
 cd /d "%~dp0"
 
 :: ============================================================
-:: Detect: double-click (explorer) vs command-line
+:: Detect: double-click (explorer) vs command-line (cmd/pwsh)
+::
+:: %cmdcmdline% heuristics fail when invoked from PowerShell,
+:: because pwsh also runs .bat via `cmd.exe /c "...\file.bat""`,
+:: matching the same pattern explorer.exe uses. 100% reliable
+:: method: ask the OS for the parent process name. If the
+:: immediate parent is explorer.exe -> real double click,
+:: otherwise (cmd.exe, powershell.exe, pwsh, any other shell)
+:: -> command line invocation.
 :: ============================================================
 set "double_clicked=false"
-echo %cmdcmdline% | find /i "cmd /c" >nul
-if %errorlevel%==0 (
-    echo %cmdcmdline% | find /i "%~0" >nul
-    if %errorlevel%==0 set "double_clicked=true"
-)
-echo %cmdcmdline% | find /i "cmd.exe" >nul
-if %errorlevel%==0 (
-    if "%~0"=="%~dpnx0" set "double_clicked=true"
-)
+powershell -NoProfile -NonInteractive -Command "$pi = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\"; $pp = Get-Process -Id $pi.ParentProcessId -ErrorAction SilentlyContinue; if ($pp -and $pp.ProcessName -eq 'explorer') { exit 0 } else { exit 1 }"
+if %errorlevel%==0 set "double_clicked=true"
 
-:: CLI mode: no args = usage, with args = dispatch
+:: CLI mode: no args + shell invocation = usage; with args = dispatch
 if "%~1"=="" (
     if "!double_clicked!"=="false" (
         goto :USAGE
@@ -251,6 +252,7 @@ echo    debug      Build Debug
 echo    rebuild    Clean + Release build
 echo    clean      Remove build directory
 echo.
-echo  No arguments + double-click = interactive menu.
+echo  No arguments + double-click from explorer = interactive menu.
+echo  No arguments + cmd/PowerShell invocation   = show this help.
 echo.
 exit /b 1
