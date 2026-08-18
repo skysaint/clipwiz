@@ -63,6 +63,19 @@ void AsyncWriter::Run() {
 
         EnterCriticalSection(&cs_);
         if (stop_) {
+            // Last-ditch flush: if there is pending data when Stop() fires,
+            // write it synchronously on our way out so it is never dropped.
+            if (hasPending_) {
+                std::wstring path = std::move(pendingPath_);
+                std::vector<uint8_t> data = std::move(pendingData_);
+                hasPending_ = false;
+                LeaveCriticalSection(&cs_);
+                if (!data.empty()) {
+                    util::WriteFileAtomic(path, data.data(), data.size());
+                }
+                EnterCriticalSection(&cs_);
+            }
+            busy_.store(false, std::memory_order_release);
             LeaveCriticalSection(&cs_);
             break;
         }

@@ -34,6 +34,7 @@ struct State {
     Host* host = nullptr;
     HWND hwnd = nullptr;
     HWND edit = nullptr;
+    HWND sb = nullptr;  // Vertical scrollbar (child SBS_VERT)
     WNDPROC editOrig = nullptr;
     HFONT font = nullptr;
     HFONT fontSmall = nullptr;
@@ -42,6 +43,7 @@ struct State {
 
     // Metrics (pixels)
     int width = 0;
+    int scrollW = 0;  // Vertical scrollbar width
     int titleH = 0;
     int pad = 0;
     int editH = 0;
@@ -130,6 +132,10 @@ void CalcMetrics() {
     int hintTextW = MeasureTextWidth(g.fontSmall, i18n::T("popup.hint"));
     int filterHintW = MeasureTextWidth(g.font, i18n::T("popup.filter_hint"));
 
+    g.scrollW = GetSystemMetrics(SM_CXVSCROLL);
+    if (g.scrollW <= 0) g.scrollW = util::Scale(16, g.dpi);
+    g.scrollW = std::max(g.scrollW, util::Scale(14, g.dpi));
+
     g.pad = std::max(util::Scale(8, g.dpi), g.fontMainH / 2);
     g.titleH = std::max(util::Scale(26, g.dpi), g.fontMainH + g.pad);
     g.editH = std::max(util::Scale(24, g.dpi), g.fontMainH + g.pad + util::Scale(2, g.dpi));
@@ -145,7 +151,7 @@ void CalcMetrics() {
     int minTextW = std::max({util::Scale(240, g.dpi), titleTextW + util::Scale(36, g.dpi),
                              hintTextW + util::Scale(20, g.dpi), filterHintW + util::Scale(20, g.dpi)});
     g.width = std::max(util::Scale(520, g.dpi),
-                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + g.hotkeyW + minTextW);
+                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + g.hotkeyW + minTextW) + g.scrollW;
 }
 
 int ListTop() { return g.titleH + g.pad + g.editH + g.pad / 2; }
@@ -162,7 +168,7 @@ RECT ListRect() {
     RECT r;
     r.left = g.pad;
     r.top = ListTop();
-    r.right = g.width - g.pad;
+    r.right = g.width - g.pad - g.scrollW;
     r.bottom = ListBottom();
     return r;
 }
@@ -176,6 +182,11 @@ void ApplyPopupFontToControls() {
 void RelayoutWindow() {
     if (g.edit) {
         SetWindowPos(g.edit, nullptr, g.pad, g.titleH + g.pad / 2, g.width - g.pad * 2, g.editH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (g.sb) {
+        RECT list = ListRect();
+        SetWindowPos(g.sb, nullptr, list.right, list.top, g.scrollW, list.bottom - list.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (g.hwnd) {
@@ -216,6 +227,8 @@ const Thumb* GetThumb(uint64_t id) {
 }
 
 // ---------------- Rebuild list ----------------
+
+void UpdateScrollbar();  // forward declaration
 
 void Rebuild() {
     std::wstring filter;
@@ -269,6 +282,7 @@ void Rebuild() {
             g.top = g.sel - vis + 1;
         }
     }
+    UpdateScrollbar();
 }
 
 void Redraw() {
@@ -285,6 +299,20 @@ void EnsureVisible() {
     if (g.sel >= g.top + vis) {
         g.top = g.sel - vis + 1;
     }
+}
+
+void UpdateScrollbar() {
+    if (!g.sb) return;
+    int count = static_cast<int>(g.rows.size());
+    int vis = g.host->RowsVisible();
+    SCROLLINFO si = {sizeof(si)};
+    si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+    si.nMin = 0;
+    si.nMax = std::max(0, count - 1);
+    si.nPage = static_cast<UINT>(std::max(1, vis));
+    si.nPos = std::clamp(g.top, 0, std::max(0, count - vis));
+    SendMessageW(g.sb, SBM_SETSCROLLINFO, TRUE, reinterpret_cast<LPARAM>(&si));
+    g.top = std::clamp(g.top, 0, std::max(0, count - vis));
 }
 
 // ---------------- Drawing ----------------
@@ -657,6 +685,7 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
             g.host->MovePinned(g.rows[static_cast<size_t>(g.sel)].id, delta);
             g.sel += delta;
             EnsureVisible();
+            UpdateScrollbar();
             Redraw();
             return true;
         }
@@ -685,26 +714,26 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
     int vis = g.host->RowsVisible();
     int count = static_cast<int>(g.rows.size());
     if (vk == VK_UP) {
-        if (g.sel > 0) { --g.sel; EnsureVisible(); Redraw(); }
+        if (g.sel > 0) { --g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(); }
         return true;
     }
     if (vk == VK_DOWN) {
-        if (g.sel < count - 1) { ++g.sel; EnsureVisible(); Redraw(); }
+        if (g.sel < count - 1) { ++g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(); }
         return true;
     }
     if (vk == VK_PRIOR) {
-        g.sel = std::max(0, g.sel - vis); EnsureVisible(); Redraw();
+        g.sel = std::max(0, g.sel - vis); EnsureVisible(); UpdateScrollbar(); Redraw();
         return true;
     }
     if (vk == VK_NEXT) {
-        g.sel = std::min(count - 1, g.sel + vis); EnsureVisible(); Redraw();
+        g.sel = std::min(count - 1, g.sel + vis); EnsureVisible(); UpdateScrollbar(); Redraw();
         return true;
     }
     if (ctrl && vk == VK_HOME) {
-        g.sel = 0; EnsureVisible(); Redraw(); return true;
+        g.sel = 0; EnsureVisible(); UpdateScrollbar(); Redraw(); return true;
     }
     if (ctrl && vk == VK_END) {
-        g.sel = count - 1; EnsureVisible(); Redraw(); return true;
+        g.sel = count - 1; EnsureVisible(); UpdateScrollbar(); Redraw(); return true;
     }
     return false;
 }
@@ -1006,6 +1035,51 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             } else {
                 g.top = std::min(std::max(0, count - vis), g.top + 3);
             }
+            UpdateScrollbar();
+            Redraw();
+            return 0;
+        }
+        case WM_VSCROLL: {
+            HWND sbWnd = reinterpret_cast<HWND>(lparam);
+            if (sbWnd != g.sb) {
+                return 0;
+            }
+            int vis = g.host->RowsVisible();
+            int count = static_cast<int>(g.rows.size());
+            int code = LOWORD(wparam);
+            switch (code) {
+                case SB_LINEUP:
+                    g.top = std::max(0, g.top - 1);
+                    break;
+                case SB_LINEDOWN:
+                    g.top = std::min(std::max(0, count - vis), g.top + 1);
+                    break;
+                case SB_PAGEUP:
+                    g.top = std::max(0, g.top - vis);
+                    break;
+                case SB_PAGEDOWN:
+                    g.top = std::min(std::max(0, count - vis), g.top + vis);
+                    break;
+                case SB_TOP:
+                    g.top = 0;
+                    break;
+                case SB_BOTTOM:
+                    g.top = std::max(0, count - vis);
+                    break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: {
+                    SCROLLINFO si = {sizeof(si)};
+                    si.fMask = SIF_TRACKPOS;
+                    if (GetScrollInfo(sbWnd, SB_CTL, &si)) {
+                        g.top = std::clamp(static_cast<int>(si.nTrackPos), 0,
+                                           std::max(0, count - vis));
+                    }
+                    break;
+                }
+                default:
+                    return 0;
+            }
+            UpdateScrollbar();
             Redraw();
             return 0;
         }
@@ -1033,10 +1107,15 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             g.thumbs.clear();
             PositionWindow();
+            UpdateScrollbar();
             Redraw();
             return 0;
         case WM_DESTROY:
             HidePreview();
+            if (g.sb) {
+                DestroyWindow(g.sb);
+                g.sb = nullptr;
+            }
             if (g.edit && g.editOrig) {
                 SetWindowLongPtrW(g.edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g.editOrig));
                 g.editOrig = nullptr;
@@ -1101,6 +1180,15 @@ bool Init(HINSTANCE inst, Host* host) {
     g.editOrig = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrW(g.edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditProc)));
 
+    // Vertical scrollbar (child, SBS_VERT) sized exactly to the list area
+    {
+        RECT list = ListRect();
+        g.sb = CreateWindowExW(0, L"SCROLLBAR", L"",
+                               WS_CHILD | WS_VISIBLE | SBS_VERT | SBS_RIGHTALIGN,
+                               list.right, list.top, g.scrollW, list.bottom - list.top, g.hwnd,
+                               nullptr, inst, nullptr);
+    }
+
     return true;
 }
 
@@ -1128,6 +1216,7 @@ void Show() {
     HidePreview();
 
     Rebuild();
+    UpdateScrollbar();
     PositionWindow();
     SetWindowPos(g.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     ShowWindow(g.hwnd, SW_SHOW);

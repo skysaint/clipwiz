@@ -474,7 +474,7 @@ void App::TogglePin(uint64_t id) {
     if (!item) return;
     store_.SetPinned(id, !item->pinned);
     popup::OnDataChanged();
-    SaveNow();
+    ScheduleSave();
     RegisterAllHotkeys(false);
 }
 
@@ -501,14 +501,14 @@ void App::DeleteItem(uint64_t id) {
     }
     store_.Remove(id);
     popup::OnDataChanged();
-    SaveNow();
+    ScheduleSave();
     RegisterAllHotkeys(false);
 }
 
 void App::MovePinned(uint64_t id, int delta) {
     if (store_.MovePinned(id, delta)) {
         popup::OnDataChanged();
-        SaveNow();
+        ScheduleSave();
     }
 }
 

@@ -675,12 +675,11 @@ bool Store::Touch(uint64_t id) {
 }
 
 bool Store::MovePinned(uint64_t id, int delta) {
-    // Find current index within pinned section
     int pinnedIdx = -1;
     int count = 0;
     for (size_t i = 0; i < items_.size(); ++i) {
         if (!items_[i].pinned) {
-            break;  // Pinned section is at the front
+            break;
         }
         if (items_[i].id == id) {
             pinnedIdx = count;
@@ -694,21 +693,14 @@ bool Store::MovePinned(uint64_t id, int delta) {
     if (target < 0 || target >= count) {
         return false;
     }
-    // Swap positions in items_
-    size_t srcIdx = static_cast<size_t>(pinnedIdx);
-    size_t dstIdx = static_cast<size_t>(target);
-    Item tmp = std::move(items_[srcIdx]);
-    items_.erase(items_.begin() + static_cast<ptrdiff_t>(srcIdx));
-    items_.insert(items_.begin() + static_cast<ptrdiff_t>(dstIdx), std::move(tmp));
-    return true;
+    return MovePinnedTo(id, target);
 }
 
 bool Store::MovePinnedTo(uint64_t id, int targetIndex) {
     int count = PinnedCount();
-    if (targetIndex < 0 || targetIndex >= count) {
+    if (targetIndex < 0 || targetIndex > count) {
         return false;
     }
-    // Find the current item
     size_t srcIdx = items_.size();
     for (size_t i = 0; i < items_.size(); ++i) {
         if (items_[i].id == id && items_[i].pinned) {
@@ -719,9 +711,13 @@ bool Store::MovePinnedTo(uint64_t id, int targetIndex) {
     if (srcIdx >= items_.size()) {
         return false;
     }
+    size_t insertAt = static_cast<size_t>(targetIndex);
+    if (targetIndex > static_cast<int>(srcIdx)) {
+        insertAt = static_cast<size_t>(targetIndex - 1);
+    }
     Item tmp = std::move(items_[srcIdx]);
     items_.erase(items_.begin() + static_cast<ptrdiff_t>(srcIdx));
-    items_.insert(items_.begin() + targetIndex, std::move(tmp));
+    items_.insert(items_.begin() + static_cast<ptrdiff_t>(insertAt), std::move(tmp));
     return true;
 }
 
