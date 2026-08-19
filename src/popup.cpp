@@ -88,6 +88,33 @@ struct State {
 
 State g;
 
+// ---------------- Pinned-order helpers (shared by click + paint + hit-test) ----------------
+//
+// Route directly to Store's order-aware helpers so button disabled-state,
+// click behavior, and MovePinnedTo() share a single coordinate system:
+// the pinned index sorted by Item.order (which Store::CompactOrders keeps
+// contiguous as 1..N).  No more drift between g.rows local indices and
+// what MovePinnedTo() actually expects.
+
+static inline int PinnedIndexOf(uint64_t rowId) {
+    return g.host ? g.host->GetStore().PinnedIndexOf(rowId) : -1;
+}
+
+static inline int TotalPinnedCount() {
+    return g.host ? g.host->GetStore().PinnedCount() : 0;
+}
+
+static inline bool IsSortBtnEnabled(int pinnedIdx, int pinnedCount, int btn) {
+    if (pinnedIdx < 0 || pinnedCount <= 1) return false;
+    switch (btn) {
+        case 0: return pinnedIdx > 0;                 // to top
+        case 1: return pinnedIdx > 0;                 // up one
+        case 2: return pinnedIdx < pinnedCount - 1;   // down one
+        case 3: return pinnedIdx < pinnedCount - 1;   // to bottom
+    }
+    return false;
+}
+
 // ---------------- Metrics ----------------
 
 HFONT CreatePopupFont(int pointDelta) {
@@ -313,9 +340,14 @@ void Rebuild() {
     UpdateScrollbar();
 }
 
-void Redraw() {
-    if (g.hwnd) {
+void Redraw(bool fullWindow) {
+    if (!g.hwnd) return;
+    if (fullWindow) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
+    } else {
+        RECT list = ListRect();
+        list.right += g.scrollW;
+        InvalidateRect(g.hwnd, &list, FALSE);
     }
 }
 
@@ -622,7 +654,9 @@ void PaintAll(HDC target, const RECT& client) {
     // Sort icons + hover highlight for pinned rows (painted on top of rows)
     {
         COLORREF fg = dark ? K_PIN_SORT_FG_DARK : K_PIN_SORT_FG_LIGHT;
+        COLORREF fgDisabled = dark ? RGB(0x5b, 0x71, 0x8b) : RGB(0x9e, 0xb3, 0xcc);
         HPEN pn = CreatePen(PS_SOLID, std::max(1, util::Scale(1, g.dpi)), fg);
+        HPEN pnDis = CreatePen(PS_SOLID, std::max(1, util::Scale(1, g.dpi)), fgDisabled);
         HGDIOBJ op = SelectObject(mem, pn);
         for (int i = g.top; i < end; ++i) {
             const Row& row = g.rows[static_cast<size_t>(i)];
@@ -633,15 +667,14 @@ void PaintAll(HDC target, const RECT& client) {
             rowRc.top = list.top + (i - g.top) * g.rowH;
             rowRc.bottom = rowRc.top + g.rowH;
             RECT brs[4];
-            // Sort-button slot sits flush against the right edge of the row
-            // (minus a small pad so the last icon doesn't kiss the scrollbar).
-            // No separate hotkey strip is reserved on rows; per-row hotkey
-            // hints live only in the bottom global hint bar.
             int buttonsRight = rowRc.right - g.pad / 2;
             SortButtonRects(buttonsRight, rowRc.top, brs);
+            int pinnedIdx = PinnedIndexOf(row.id);
+            int pinnedCount = TotalPinnedCount();
             for (int b = 0; b < 4; ++b) {
                 RECT br = brs[b];
-                bool hover = (g.hoverRow == i && g.hoverSortBtn == b);
+                bool enabled = IsSortBtnEnabled(pinnedIdx, pinnedCount, b);
+                bool hover = enabled && (g.hoverRow == i && g.hoverSortBtn == b);
                 if (hover) {
                     HBRUSH hb = CreateSolidBrush(dark ? K_PIN_BTN_HOVER_DARK : K_PIN_BTN_HOVER_LIGHT);
                     RECT hbRc = br;
@@ -649,52 +682,55 @@ void PaintAll(HDC target, const RECT& client) {
                     FillRect(mem, &hbRc, hb);
                     DeleteObject(hb);
                 }
+                if (!enabled) {
+                    SelectObject(mem, pnDis);
+                }
                 int cx = br.left + (br.right - br.left) / 2;
                 int cy = br.top + (br.bottom - br.top) / 2;
                 int w = (br.right - br.left) * 3 / 4;
                 int h = (br.bottom - br.top) * 3 / 4;
                 switch (b) {
-                    case 0: {  // First (move to top): double upward chevrons
+                    case 0: {
                         int ay = cy;
-                        // Upper chevron
                         MoveToEx(mem, cx - w / 2, ay, nullptr);
                         LineTo(mem, cx, ay - h / 2);
                         LineTo(mem, cx + w / 2, ay);
-                        // Lower chevron
                         MoveToEx(mem, cx - w / 2, ay + h / 3, nullptr);
                         LineTo(mem, cx, ay - h / 6);
                         LineTo(mem, cx + w / 2, ay + h / 3);
                         break;
                     }
-                    case 1: {  // Up: single upward chevron
+                    case 1: {
                         MoveToEx(mem, cx - w / 2, cy + h / 3, nullptr);
                         LineTo(mem, cx, cy - h / 3);
                         LineTo(mem, cx + w / 2, cy + h / 3);
                         break;
                     }
-                    case 2: {  // Down: single downward chevron
+                    case 2: {
                         MoveToEx(mem, cx - w / 2, cy - h / 3, nullptr);
                         LineTo(mem, cx, cy + h / 3);
                         LineTo(mem, cx + w / 2, cy - h / 3);
                         break;
                     }
-                    case 3: {  // Last (move to bottom): double downward chevrons
+                    case 3: {
                         int ay = cy;
-                        // Upper chevron
                         MoveToEx(mem, cx - w / 2, ay - h / 3, nullptr);
                         LineTo(mem, cx, ay + h / 6);
                         LineTo(mem, cx + w / 2, ay - h / 3);
-                        // Lower chevron
                         MoveToEx(mem, cx - w / 2, ay, nullptr);
                         LineTo(mem, cx, ay + h / 2);
                         LineTo(mem, cx + w / 2, ay);
                         break;
                     }
                 }
+                if (!enabled) {
+                    SelectObject(mem, pn);
+                }
             }
         }
         SelectObject(mem, op);
         DeleteObject(pn);
+        DeleteObject(pnDis);
     }
 
     // Drag reorder insert line
@@ -927,7 +963,7 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
             g.sel += delta;
             EnsureVisible();
             UpdateScrollbar();
-            Redraw();
+            Redraw(false);
             return true;
         }
         return false;
@@ -955,26 +991,26 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
     int vis = g.host->RowsVisible();
     int count = static_cast<int>(g.rows.size());
     if (vk == VK_UP) {
-        if (g.sel > 0) { --g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(); }
+        if (g.sel > 0) { --g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(false); }
         return true;
     }
     if (vk == VK_DOWN) {
-        if (g.sel < count - 1) { ++g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(); }
+        if (g.sel < count - 1) { ++g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(false); }
         return true;
     }
     if (vk == VK_PRIOR) {
-        g.sel = std::max(0, g.sel - vis); EnsureVisible(); UpdateScrollbar(); Redraw();
+        g.sel = std::max(0, g.sel - vis); EnsureVisible(); UpdateScrollbar(); Redraw(false);
         return true;
     }
     if (vk == VK_NEXT) {
-        g.sel = std::min(count - 1, g.sel + vis); EnsureVisible(); UpdateScrollbar(); Redraw();
+        g.sel = std::min(count - 1, g.sel + vis); EnsureVisible(); UpdateScrollbar(); Redraw(false);
         return true;
     }
     if (ctrl && vk == VK_HOME) {
-        g.sel = 0; EnsureVisible(); UpdateScrollbar(); Redraw(); return true;
+        g.sel = 0; EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
     }
     if (ctrl && vk == VK_END) {
-        g.sel = count - 1; EnsureVisible(); UpdateScrollbar(); Redraw(); return true;
+        g.sel = count - 1; EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
     }
     return false;
 }
@@ -1137,11 +1173,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             bool dark = theme.bg < RGB(128, 128, 128);
             const COLORREF K_EDIT_LIGHT = RGB(0xed, 0xf2, 0xfa); // #EDF2FA
             const COLORREF K_EDIT_DARK  = RGB(0x37, 0x4b, 0x63); // #374B63
-            COLORREF editBg = dark ? K_EDIT_DARK : K_EDIT_LIGHT;
+            COLORREF bg = dark ? K_EDIT_DARK : K_EDIT_LIGHT;
             SetTextColor(hdc, theme.fg);
-            SetBkColor(hdc, editBg);
-            if (g.editBg) { DeleteObject(g.editBg); g.editBg = nullptr; }
-            g.editBg = CreateSolidBrush(editBg);
+            SetBkColor(hdc, bg);
+            if (!g.editBg) {
+                g.editBg = CreateSolidBrush(bg);
+            }
             return reinterpret_cast<LRESULT>(g.editBg);
         }
         case WM_NCHITTEST: {
@@ -1195,33 +1232,27 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     rowRc.bottom = rowRc.top + g.rowH;
                     int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, x, y);
                     if (b >= 0 && r.pinned) {
-                        int pinnedCount = 0;
-                        for (const auto& rr : g.rows) {
-                            if (rr.pinned) ++pinnedCount;
-                        }
-                        int current = -1;
-                        for (int i = 0; i < pinnedCount; ++i) {
-                            if (g.rows[static_cast<size_t>(i)].id == r.id) { current = i; break; }
-                        }
-                        if (current >= 0) {
+                        int pinnedCount = TotalPinnedCount();
+                        int current = PinnedIndexOf(r.id);
+                        if (current >= 0 && IsSortBtnEnabled(current, pinnedCount, b)) {
                             int target = current;
                             switch (b) {
                                 case 0: target = 0; break;
-                                case 1: target = std::max(0, current - 1); break;
-                                case 2: target = std::min(std::max(0, pinnedCount - 1), current + 1); break;
-                                case 3: target = std::max(0, pinnedCount - 1); break;
+                                case 1: target = current - 1; break;
+                                case 2: target = current + 1; break;
+                                case 3: target = pinnedCount - 1; break;
                             }
-                            if (target != current) {
+                            if (target != current && target >= 0 && target < pinnedCount) {
                                 g.host->GetStore().MovePinnedTo(r.id, target);
                                 OnDataChanged();
                             }
                         }
                         g.sel = idx;
-                        Redraw();
+                        Redraw(false);
                         return 0;
                     }
                     g.sel = idx;
-                    Redraw();
+                    Redraw(false);
                     // Start drag reorder in pinned area
                     if (g.rows[static_cast<size_t>(idx)].pinned) {
                         g.reorderDrag = true;
@@ -1264,8 +1295,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                             rowRc.bottom = rowRc.top + g.rowH;
                             int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, mx, my);
                             if (b >= 0) {
-                                newHoverRow = idx;
-                                newHoverBtn = b;
+                                int pi = PinnedIndexOf(r.id);
+                                int pc = TotalPinnedCount();
+                                if (IsSortBtnEnabled(pi, pc, b)) {
+                                    newHoverRow = idx;
+                                    newHoverBtn = b;
+                                }
                             }
                         }
                     }
@@ -1275,20 +1310,20 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 g.closeHover = newCloseHover;
                 g.hoverRow = newHoverRow;
                 g.hoverSortBtn = newHoverBtn;
-                Redraw();
+                if (newCloseHover != g.closeHover || g.closeHover) {
+                    Redraw(true);
+                } else {
+                    Redraw(false);
+                }
             }
             if (g.reorderDrag) {
                 RECT list = ListRect();
                 int y = my;
                 int rel = y - list.top;
                 int insertIdx = g.top + std::clamp(rel / g.rowH, 0, g.host->RowsVisible());
-                int pinnedCount = 0;
-                for (const auto& rr : g.rows) {
-                    if (rr.pinned) ++pinnedCount;
-                }
-                insertIdx = std::clamp(insertIdx, 0, pinnedCount);
+                insertIdx = std::clamp(insertIdx, 0, TotalPinnedCount());
                 g.reorderInsert = insertIdx;
-                Redraw();
+                Redraw(false);
                 return 0;
             }
             // Ctrl+hover preview
@@ -1316,10 +1351,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_MOUSELEAVE: {
             g.mouseTracking = false;
             if (g.closeHover || g.hoverRow >= 0 || g.hoverSortBtn >= 0) {
+                bool needFull = g.closeHover;
                 g.closeHover = false;
                 g.hoverRow = -1;
                 g.hoverSortBtn = -1;
-                Redraw();
+                Redraw(needFull);
             }
             return 0;
         }
@@ -1334,7 +1370,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
                 g.reorderFrom = -1;
                 g.reorderInsert = -1;
-                Redraw();
+                Redraw(false);
                 return 0;
             }
             return 0;
@@ -1355,7 +1391,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 int idx = g.top + (y - list.top) / g.rowH;
                 if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
                     g.sel = idx;
-                    Redraw();
+                    Redraw(false);
                     ShowRowMenu(idx);
                 }
             }
@@ -1371,7 +1407,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 g.top = std::min(std::max(0, count - vis), g.top + 3);
             }
             UpdateScrollbar();
-            Redraw();
+            Redraw(false);
             return 0;
         }
         case WM_VSCROLL: {
@@ -1415,7 +1451,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     return 0;
             }
             UpdateScrollbar();
-            Redraw();
+            Redraw(false);
             return 0;
         }
         case WM_TIMER:
@@ -1443,7 +1479,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             g.thumbs.clear();
             PositionWindow();
             UpdateScrollbar();
-            Redraw();
+            Redraw(true);
             return 0;
         case WM_DESTROY:
             HidePreview();
@@ -1607,15 +1643,19 @@ void Show() {
                         rowRc.bottom = rowRc.top + g.rowH;
                         int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, pt.x, pt.y);
                         if (b >= 0) {
-                            g.hoverRow = idx;
-                            g.hoverSortBtn = b;
+                            int pi = PinnedIndexOf(r.id);
+                            int pc = TotalPinnedCount();
+                            if (IsSortBtnEnabled(pi, pc, b)) {
+                                g.hoverRow = idx;
+                                g.hoverSortBtn = b;
+                            }
                         }
                     }
                 }
             }
         }
     }
-    Redraw();
+    Redraw(true);
 }
 
 void Hide() {
@@ -1674,13 +1714,13 @@ void OnThemeChanged() {
         SendMessageW(g.edit, EM_SETCUEBANNER, TRUE,
                      reinterpret_cast<LPARAM>(i18n::T("popup.filter_hint")));
     }
-    Redraw();
+    Redraw(true);
 }
 
 void OnDataChanged() {
     if (IsWindowVisible(g.hwnd)) {
         Rebuild();
-        Redraw();
+        Redraw(true);
     }
 }
 
@@ -1691,7 +1731,7 @@ void OnSettingsChanged() {
     ApplyPopupFontToControls();
     if (IsWindowVisible(g.hwnd)) {
         RelayoutWindow();
-        Redraw();
+        Redraw(true);
     }
 }
 

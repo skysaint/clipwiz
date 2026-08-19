@@ -29,6 +29,11 @@ struct Item {
     uint64_t id = 0;
     ItemKind kind = ItemKind::Text;
     bool pinned = false;
+    uint32_t order = 0;         // Single global sort key:
+                                //   pinned items live in [1, kMaxPinnedOrder]
+                                //   unpinned items live in [kUnpinnedOrderBase, 0xFFFFFFFF]
+                                //   Zero = unassigned (filled in during initial load from
+                                //   legacy store files or at Add() time).
     uint64_t createdAt = 0;
     uint64_t usedAt = 0;
     std::vector<uint8_t> data;  // Unified binary content
@@ -64,6 +69,10 @@ public:
     // Pinned item reordering
     bool MovePinned(uint64_t id, int delta);         // Move up/down by delta positions
     bool MovePinnedTo(uint64_t id, int targetIndex); // Drag to target position
+
+    // Query helpers used by popup (both operate on ordered pinned section,
+    // consistent with what the user actually sees on screen)
+    int PinnedIndexOf(uint64_t id) const;
 
     void SetLimits(int maxHistory, int expiryDays);
     void ExpireCheck();  // Remove expired unpinned items

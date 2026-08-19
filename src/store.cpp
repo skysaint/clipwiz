@@ -5,15 +5,29 @@
 #include <cstring>
 
 #include "i18n.h"
+#include "log.h"
 #include "util.h"
 
 namespace {
 
-constexpr uint32_t kStoreVersion = 1;
+constexpr uint32_t kStoreVersion = 2;   // v2: added per-item `order` field (uint32)
 constexpr size_t kHeaderSize = 32;
 const char kMagic[4] = {'C', 'L', 'P', 'W'};
 
 constexpr uint32_t kFlagPinned = 0x1;
+
+// Order value space (single global sort key, pinned + unpinned sections are
+// defined purely by numeric range — filtering/sorting never needs to consult
+// the `pinned` bool separately for order-related questions).
+constexpr uint32_t kMinPinnedOrder    = 1u;
+constexpr uint32_t kMaxPinnedOrder    = 100000u;        // Match kMaxItemCount so a fully-pinned
+                                                        // library (100k items) has unique orders
+constexpr uint32_t kUnpinnedOrderBase = kMaxPinnedOrder + 1u;  // [100001..4e9] keeps sections numericall
+// (wrapped comment tail — see line above)
+constexpr uint32_t kMaxUnpinnedOrder  = 0xFFFFFFFFu - 1u;  // leave one slot so +1 never wraps
+
+inline bool IsPinnedOrder(uint32_t o)  { return o >= kMinPinnedOrder && o <= kMaxPinnedOrder; }
+inline bool IsPinnedOrderLegit(uint32_t o) { return o != 0 && (IsPinnedOrder(o) || o >= kUnpinnedOrderBase); }
 
 // Hard cap per item data to prevent corrupted files from exhausting memory (64 MB)
 constexpr uint32_t kMaxDataLen = 64u * 1024u * 1024u;
@@ -529,6 +543,34 @@ int Store::PinnedCount() const {
     return n;
 }
 
+int Store::PinnedIndexOf(uint64_t id) const {
+    // Both sort and lookup key = order value; pinned section is contiguous by
+    // range.  This is O(n) but n < 100 for pinned in practice.
+    const Item* me = nullptr;
+    uint32_t meOrder = 0;
+    for (const Item& it : items_) {
+        if (it.id == id && it.pinned) {
+            me = &it;
+            meOrder = IsPinnedOrderLegit(it.order) ? it.order : 0u;
+            break;
+        }
+    }
+    if (!me) return -1;
+    // Count strictly-smaller pinned order values -> 0-based index.
+    int idx = 0;
+    for (const Item& it : items_) {
+        if (!it.pinned) continue;
+        uint32_t o = IsPinnedOrderLegit(it.order) ? it.order : 0u;
+        if (o == 0) continue;
+        if (o < meOrder) ++idx;
+        else if (o == meOrder && &it != me) ++idx;  // Tie-break: physical order
+    }
+    // Safety: never exceed logical pinned count - 1.
+    int pc = PinnedCount();
+    if (idx >= pc) idx = std::max(0, pc - 1);
+    return idx;
+}
+
 int Store::HistoryCount() const {
     return static_cast<int>(items_.size()) - PinnedCount();
 }
@@ -540,62 +582,95 @@ void Store::SetLimits(int maxHistory, int expiryDays) {
     Evict();
 }
 
-// Pinned section keeps manual order; unpinned section sorted by usedAt descending
-void Store::Reorder() {
-    std::stable_sort(items_.begin(), items_.end(), [](const Item& a, const Item& b) {
-        if (a.pinned != b.pinned) {
-            return a.pinned;  // Pinned items first
-        }
-        if (a.pinned) {
-            return false;  // Within pinned section, maintain original relative order (stable_sort guarantees)
-        }
-        if (a.usedAt != b.usedAt) {
-            return a.usedAt > b.usedAt;
-        }
-        return a.id > b.id;
+// Make sure every item's `order` is normalized to (pinned -> [1..pcount]
+// contiguous, unpinned -> [kUnpinnedOrderBase..kUnpinnedOrderBase+ucount-1]
+// contiguous).  Any move/setPinned/add op that pushes us to either section
+// ceiling triggers a renormalization so we never hit the hard uint32 cap.
+// This is cheap (<1 us for a few hundred items) and eliminates the risk of
+// a "no-op" swap because the neighbor slot was already clamped.
+namespace {
+void CompactOrders(std::vector<Item>& items) {
+    // First sort by (section, existing order, tie-breaker id) so physical order
+    // is stable before we stamp new contiguous values.
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        bool ap = a.pinned, bp = b.pinned;
+        if (ap != bp) return ap;
+        uint32_t ao = IsPinnedOrderLegit(a.order) ? a.order : 0u;
+        uint32_t bo = IsPinnedOrderLegit(b.order) ? b.order : 0u;
+        if (ao != 0 && bo != 0) {
+            if (ao != bo) return ao < bo;
+        } else if (ao != 0) return true;
+        else if (bo != 0) return false;
+        return a.id < b.id;
     });
+    uint32_t pinNext = kMinPinnedOrder;
+    uint32_t unpNext = kUnpinnedOrderBase;
+    for (Item& it : items) {
+        if (it.pinned) {
+            it.order = pinNext;
+            if (pinNext < kMaxPinnedOrder) {
+                ++pinNext;
+            } else {
+                LOG_WARNING("CompactOrders: pinned section exhausted order space (%u items). "
+                            "Remaining pinned items share order=%u (ties broken by id).",
+                            kMaxPinnedOrder, pinNext);
+            }
+        } else {
+            it.order = unpNext;
+            if (unpNext < kMaxUnpinnedOrder) {
+                ++unpNext;
+            } else {
+                LOG_WARNING("CompactOrders: unpinned section exhausted order space (4e9 items). "
+                            "Unpinned tail shares order=%u.",
+                            unpNext);
+            }
+        }
+    }
+}
+}
+
+// Sort vector physically once by order; afterwards items_[0] = pinned-first,
+// last = oldest unpinned.  Display / index iteration becomes trivial.  The
+// `pinned` bool is still the source of truth for which section an item
+// belongs to — order is derived and compacted to match.
+void Store::Reorder() {
+    CompactOrders(items_);
 }
 
 void Store::Evict() {
-    // History limit counts only unpinned items
+    // History limit counts only unpinned items.  Unpinned items with the
+    // smallest order value = farthest back in time; that's who we kick out.
     for (;;) {
-        if (HistoryCount() <= maxHistory_) {
-            break;
-        }
-        // Find the unpinned item with the smallest usedAt
+        if (HistoryCount() <= maxHistory_) break;
         size_t victim = items_.size();
-        uint64_t oldest = UINT64_MAX;
+        uint64_t oldestUsed = UINT64_MAX;
         for (size_t i = 0; i < items_.size(); ++i) {
-            if (items_[i].pinned) {
-                continue;
-            }
-            if (items_[i].usedAt <= oldest) {
-                oldest = items_[i].usedAt;
+            if (items_[i].pinned) continue;
+            if (items_[i].usedAt <= oldestUsed) {
+                oldestUsed = items_[i].usedAt;
                 victim = i;
             }
         }
-        if (victim >= items_.size()) {
-            break;
-        }
+        if (victim >= items_.size()) break;
         items_.erase(items_.begin() + static_cast<ptrdiff_t>(victim));
     }
+    // After physical erase, recompute contiguous order space.
+    if (!items_.empty()) CompactOrders(items_);
 }
 
 void Store::ExpireCheck() {
-    if (expiryDays_ <= 0) {
-        return;
-    }
+    if (expiryDays_ <= 0) return;
     const uint64_t cutoff = util::NowFileTime() - static_cast<uint64_t>(expiryDays_) * kTicksPerDay;
+    size_t before = items_.size();
     items_.erase(
         std::remove_if(items_.begin(), items_.end(),
                        [cutoff](const Item& item) { return !item.pinned && item.usedAt < cutoff; }),
         items_.end());
+    if (items_.size() != before && !items_.empty()) CompactOrders(items_);
 }
 
 uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uint32_t imgH) {
-    if (data.empty()) {
-        return 0;
-    }
+    if (data.empty()) return 0;
     const uint64_t hash = util::Hash64(data.data(), data.size());
     const uint64_t now = util::NowFileTime();
 
@@ -603,13 +678,24 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     for (Item& item : items_) {
         if (item.kind == kind && item.hash == hash && item.data == data) {
             if (item.pinned) {
-                // Pinned item duplicate: do nothing, preserve manual order
                 return item.id;
             } else {
-                // Unpinned duplicate: refresh usedAt and move to front of unpinned section
-                item.usedAt = now;
+                // Save id BEFORE CompactOrders (stable_sort swaps vector
+                // element VALUES, so a reference bound to physical slot X
+                // would end up pointing to a different Item object after).
+                const uint64_t dupId = item.id;
+                CompactOrders(items_);
+                Item* dup = FindMutable(dupId);
+                if (!dup) return 0;  // Defensive: id vanished somehow
+                dup->usedAt = now;
+                // Move to tail of unpinned section.
+                uint32_t maxUp = kUnpinnedOrderBase;
+                for (const Item& it : items_) {
+                    if (!it.pinned && it.order > maxUp) maxUp = it.order;
+                }
+                dup->order = (maxUp < kMaxUnpinnedOrder) ? (maxUp + 1u) : kUnpinnedOrderBase;
                 Reorder();
-                return item.id;
+                return dupId;
             }
         }
     }
@@ -625,6 +711,14 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     item.hash = hash;
     item.preview = MakeItemPreview(item);
     const uint64_t id = item.id;
+    item.pinned = false;
+    // Assign to end of unpinned section (will be sorted into place below).
+    // If the unpinned space is approaching the cap, Reorder compacts first.
+    uint32_t maxUp = kUnpinnedOrderBase;
+    for (const Item& it : items_) {
+        if (!it.pinned && it.order > maxUp) maxUp = it.order;
+    }
+    item.order = (maxUp < kMaxUnpinnedOrder) ? (maxUp + 1) : kUnpinnedOrderBase;
     items_.push_back(std::move(item));
     Reorder();
     Evict();
@@ -633,10 +727,38 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
 
 bool Store::SetPinned(uint64_t id, bool pinned) {
     Item* item = FindMutable(id);
-    if (!item || item->pinned == pinned) {
-        return false;
-    }
+    if (!item || item->pinned == pinned) return false;
     item->pinned = pinned;
+    // The item moves across sections: set a target order at the tail of its
+    // NEW section, then Reorder compacts + sorts physically.
+    if (pinned) {
+        // Append to pinned tail.
+        uint32_t maxP = 0;
+        for (const Item& it : items_) {
+            if (it.pinned && it.id != id && IsPinnedOrder(it.order) && it.order > maxP) {
+                maxP = it.order;
+            }
+        }
+        if (maxP >= kMaxPinnedOrder || maxP == 0) {
+            // Need renormalization; Reorder handles it.
+            item->order = kMinPinnedOrder;
+        } else {
+            item->order = maxP + 1;
+        }
+    } else {
+        // Append to unpinned tail.
+        uint32_t maxUp = kUnpinnedOrderBase;
+        for (const Item& it : items_) {
+            if (!it.pinned && it.id != id && it.order >= kUnpinnedOrderBase && it.order > maxUp) {
+                maxUp = it.order;
+            }
+        }
+        if (maxUp >= kMaxUnpinnedOrder) {
+            item->order = kUnpinnedOrderBase;
+        } else {
+            item->order = maxUp + 1;
+        }
+    }
     Reorder();
     Evict();
     return true;
@@ -646,6 +768,7 @@ bool Store::Remove(uint64_t id) {
     for (size_t i = 0; i < items_.size(); ++i) {
         if (items_[i].id == id) {
             items_.erase(items_.begin() + static_cast<ptrdiff_t>(i));
+            if (!items_.empty()) CompactOrders(items_);
             return true;
         }
     }
@@ -653,71 +776,122 @@ bool Store::Remove(uint64_t id) {
 }
 
 void Store::ClearNonPinned() {
-    // Remove all non-pinned items (start from the end to avoid index shifting)
     for (int i = static_cast<int>(items_.size()) - 1; i >= 0; --i) {
         if (!items_[i].pinned) {
             items_.erase(items_.begin() + i);
         }
     }
+    // Pinned items' physical order didn't change, but renormalize pinned
+    // order values to a contiguous [1..N] for defensive hygiene.
+    if (!items_.empty()) CompactOrders(items_);
 }
 
 bool Store::Touch(uint64_t id) {
     Item* item = FindMutable(id);
-    if (!item) {
-        return false;
-    }
+    if (!item) return false;
     item->usedAt = util::NowFileTime();
     if (!item->pinned) {
-        Reorder();  // Reorder unpinned section after usedAt refresh
+        // Promote to very end of unpinned order space, then Reorder.
+        uint32_t maxUp = kUnpinnedOrderBase;
+        for (const Item& it : items_) {
+            if (!it.pinned && &it != item && it.order >= kUnpinnedOrderBase && it.order > maxUp) {
+                maxUp = it.order;
+            }
+        }
+        if (maxUp < kMaxUnpinnedOrder) {
+            item->order = maxUp + 1;
+        } else {
+            item->order = kUnpinnedOrderBase;  // will be sorted to top after compact
+        }
+        Reorder();
     }
-    // Pinned items don't change position
     return true;
 }
 
+// ---- Pinned reordering: all logic is now just `order` value shuffling ----
+//
+// Strategy:
+//   * Move up/down one -> swap `order` value with neighbor in pinned section
+//   * Move to head/tail    -> assign new head/tail order
+//   * If any operation bumps an edge value to its ceiling (unlikely but
+//     possible after 1e5 one-way "to top" presses), trigger a full
+//     CompactOrders to re-normalize the order space.
+
 bool Store::MovePinned(uint64_t id, int delta) {
-    int pinnedIdx = -1;
-    int count = 0;
-    for (size_t i = 0; i < items_.size(); ++i) {
-        if (!items_[i].pinned) {
-            break;
-        }
-        if (items_[i].id == id) {
-            pinnedIdx = count;
-        }
-        ++count;
-    }
-    if (pinnedIdx < 0) {
-        return false;
-    }
-    int target = pinnedIdx + delta;
-    if (target < 0 || target >= count) {
-        return false;
-    }
+    if (delta == 0) return false;
+    Item* me = FindMutable(id);
+    if (!me || !me->pinned) return false;
+    if (!IsPinnedOrder(me->order)) CompactOrders(items_);  // repair bad state
+    // After potential compact, re-lookup pointer (compact moves vector!)
+    me = FindMutable(id);
+    if (!me) return false;
+    int total = PinnedCount();
+    int myIdx = PinnedIndexOf(id);
+    int target = myIdx + delta;
+    if (target < 0 || target >= total) return false;
     return MovePinnedTo(id, target);
 }
 
 bool Store::MovePinnedTo(uint64_t id, int targetIndex) {
     int count = PinnedCount();
-    if (targetIndex < 0 || targetIndex > count) {
+    if (targetIndex < 0 || targetIndex >= count) return false;
+    Item* me = FindMutable(id);
+    if (!me || !me->pinned) return false;
+    int myIdx = PinnedIndexOf(id);
+    if (myIdx == targetIndex) return false;
+
+    // Gather *all* pinned items sorted by (order, id) -> we can directly
+    // compute what the new order value for `me` should be by mapping the
+    // targetIndex to the neighbor whose slot we're taking.  Simplest safe
+    // approach: compact the orders, then swap me into target index.
+    CompactOrders(items_);
+    // Compact may have invalidated `me` — re-fetch everything by id.
+    int pc = PinnedCount();
+    if (pc != count) {
+        // Item count changed during compact (shouldn't happen); abort safely.
         return false;
     }
-    size_t srcIdx = items_.size();
-    for (size_t i = 0; i < items_.size(); ++i) {
-        if (items_[i].id == id && items_[i].pinned) {
-            srcIdx = i;
-            break;
-        }
+    myIdx = PinnedIndexOf(id);
+    if (myIdx < 0) return false;
+    if (targetIndex < 0 || targetIndex >= pc) targetIndex = std::clamp(targetIndex, 0, pc - 1);
+    if (myIdx == targetIndex) return false;
+
+    // After compact, every pinned item's order is exactly kMinPinnedOrder +
+    // index_in_pinned_section.  To move item I to position T, simply swap
+    // I's order value with whatever item currently sits at T, or shift-
+    // assign if a range move (easier: re-stamp contiguous orders for the
+    // affected region only, which is O(count) and count < 1e5 max so fine).
+    struct PinRef { uint64_t id; uint32_t order; };
+    std::vector<PinRef> pins;
+    pins.reserve(static_cast<size_t>(pc));
+    for (const Item& it : items_) {
+        if (it.pinned) pins.push_back({it.id, it.order});
     }
-    if (srcIdx >= items_.size()) {
-        return false;
+    // Sort pins by existing order (compact guarantees they're 1..pc already
+    // but be defensive).
+    std::stable_sort(pins.begin(), pins.end(),
+                     [](const PinRef& a, const PinRef& b) { return a.order < b.order; });
+    // Find me inside pins by id.
+    int from = -1;
+    for (int i = 0; i < static_cast<int>(pins.size()); ++i) {
+        if (pins[i].id == id) { from = i; break; }
     }
-    size_t insertAt = static_cast<size_t>(targetIndex);
-    if (targetIndex > static_cast<int>(srcIdx)) {
-        insertAt = static_cast<size_t>(targetIndex - 1);
+    if (from < 0) return false;
+    int to = std::clamp(targetIndex, 0, static_cast<int>(pins.size()) - 1);
+    if (from == to) return false;
+
+    // Shift pins[from] to position `to` in the ref list.
+    PinRef moved = pins[from];
+    pins.erase(pins.begin() + from);
+    pins.insert(pins.begin() + to, moved);
+
+    // Re-stamp contiguous 1..pc orders onto items matching each pins[i].id.
+    for (int i = 0; i < static_cast<int>(pins.size()); ++i) {
+        Item* it = FindMutable(pins[i].id);
+        if (it) it->order = kMinPinnedOrder + static_cast<uint32_t>(i);
     }
-    Item tmp = std::move(items_[srcIdx]);
-    items_.erase(items_.begin() + static_cast<ptrdiff_t>(srcIdx));
-    items_.insert(items_.begin() + static_cast<ptrdiff_t>(insertAt), std::move(tmp));
+    // Finally physically re-sort the vector to match order.
+    Reorder();
     return true;
 }
 
@@ -760,9 +934,14 @@ Store::LoadResult Store::Load() {
     if (!Take(buf, pos, version) || !Take(buf, pos, count) || !Take(buf, pos, nextId)) {
         return PreserveCorrupt();
     }
-    if (version != kStoreVersion || count > kMaxItemCount) {
+    // Accept v1 (legacy, no per-item order) and v2 (current).
+    if (version != 1u && version != kStoreVersion) {
         return PreserveCorrupt();
     }
+    if (count > kMaxItemCount) {
+        return PreserveCorrupt();
+    }
+    const bool haveOrder = (version >= 2u);
     pos = kHeaderSize;
 
     std::vector<Item> loaded;
@@ -771,10 +950,12 @@ Store::LoadResult Store::Load() {
         Item item;
         uint32_t kind = 0;
         uint32_t flags = 0;
+        uint32_t order = 0;
         uint32_t dataLen = 0;
         if (!Take(buf, pos, item.id) || !Take(buf, pos, kind) || !Take(buf, pos, flags) ||
             !Take(buf, pos, item.createdAt) || !Take(buf, pos, item.usedAt) ||
             !Take(buf, pos, item.imgW) || !Take(buf, pos, item.imgH) ||
+            (haveOrder && !Take(buf, pos, order)) ||
             !Take(buf, pos, dataLen)) {
             return PreserveCorrupt();
         }
@@ -786,6 +967,11 @@ Store::LoadResult Store::Load() {
         }
         item.kind = static_cast<ItemKind>(kind);
         item.pinned = (flags & kFlagPinned) != 0;
+        if (haveOrder && IsPinnedOrderLegit(order)) {
+            item.order = order;
+        } else {
+            item.order = 0;  // Legacy: will be fixed up by CompactOrders below.
+        }
         item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
         pos += dataLen;
 
@@ -801,7 +987,7 @@ Store::LoadResult Store::Load() {
     if (nextId > nextId_) {
         nextId_ = nextId;
     }
-    Reorder();
+    Reorder();   // CompactOrders fills in legacy order==0 slots and normalizes values.
     Evict();
     return LoadResult::Ok;
 }
@@ -817,16 +1003,20 @@ bool Store::LoadItemsFrom(const std::wstring& path, std::vector<Item>& out) {
     uint64_t nextId = 0;
     if (!Take(buf, pos, version) || !Take(buf, pos, count) || !Take(buf, pos, nextId))
         return false;
-    if (version != kStoreVersion || count > kMaxItemCount) return false;
+    // Accept v1 or v2 (current).
+    if (version != 1u && version != kStoreVersion) return false;
+    if (count > kMaxItemCount) return false;
+    const bool haveOrder = (version >= 2u);
     pos = kHeaderSize;
 
     out.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         Item item;
-        uint32_t kind = 0, flags = 0, dataLen = 0;
+        uint32_t kind = 0, flags = 0, order = 0, dataLen = 0;
         if (!Take(buf, pos, item.id) || !Take(buf, pos, kind) || !Take(buf, pos, flags) ||
             !Take(buf, pos, item.createdAt) || !Take(buf, pos, item.usedAt) ||
             !Take(buf, pos, item.imgW) || !Take(buf, pos, item.imgH) ||
+            (haveOrder && !Take(buf, pos, order)) ||
             !Take(buf, pos, dataLen))
             return false;
         if (kind > static_cast<uint32_t>(ItemKind::FileDrop) || dataLen > kMaxDataLen)
@@ -834,12 +1024,19 @@ bool Store::LoadItemsFrom(const std::wstring& path, std::vector<Item>& out) {
         if (pos + dataLen > buf.size()) return false;
         item.kind = static_cast<ItemKind>(kind);
         item.pinned = (flags & kFlagPinned) != 0;
+        if (haveOrder && IsPinnedOrderLegit(order)) item.order = order;
+        else item.order = 0;
         item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
         pos += dataLen;
         item.hash = util::Hash64(item.data.data(), item.data.size());
         item.preview = MakeItemPreview(item);
         out.push_back(std::move(item));
     }
+    // LoadItemsFrom returns raw items as they were on disk (merge code compares pinned then unpinned
+    // separately); CompactOrders normalizes legacy item.order == 0 to a sane deterministic
+    // ordering so the merge output is stable.
+    if (!out.empty()) CompactOrders(out);
+    (void)nextId;
     return true;
 }
 
@@ -850,10 +1047,11 @@ bool Store::Save() {
 }
 
 std::vector<uint8_t> Store::Serialize() {
+    // v2 on-disk format always writes order field per-item.
     std::vector<uint8_t> buf;
     size_t estimate = kHeaderSize;
     for (const Item& item : items_) {
-        estimate += 44 + item.data.size();
+        estimate += 48 + item.data.size();   // 44 original + 4 for order
     }
     buf.reserve(estimate);
 
@@ -871,6 +1069,7 @@ std::vector<uint8_t> Store::Serialize() {
         Append<uint64_t>(buf, item.usedAt);
         Append<uint32_t>(buf, item.imgW);
         Append<uint32_t>(buf, item.imgH);
+        Append<uint32_t>(buf, IsPinnedOrderLegit(item.order) ? item.order : 0u);
         Append<uint32_t>(buf, static_cast<uint32_t>(item.data.size()));
         buf.insert(buf.end(), item.data.begin(), item.data.end());
     }
@@ -894,7 +1093,7 @@ std::vector<uint8_t> Store::SerializeItems(const std::vector<Item>& items) {
     std::vector<uint8_t> buf;
     size_t estimate = kHeaderSize;
     for (const Item& item : items) {
-        estimate += 44 + item.data.size();
+        estimate += 48 + item.data.size();
     }
     buf.reserve(estimate);
 
@@ -912,6 +1111,7 @@ std::vector<uint8_t> Store::SerializeItems(const std::vector<Item>& items) {
         Append<uint64_t>(buf, item.usedAt);
         Append<uint32_t>(buf, item.imgW);
         Append<uint32_t>(buf, item.imgH);
+        Append<uint32_t>(buf, IsPinnedOrderLegit(item.order) ? item.order : 0u);
         Append<uint32_t>(buf, static_cast<uint32_t>(item.data.size()));
         buf.insert(buf.end(), item.data.begin(), item.data.end());
     }
