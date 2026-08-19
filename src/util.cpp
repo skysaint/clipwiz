@@ -117,29 +117,45 @@ bool MigrateDataDir(bool toPortable) {
             std::vector<Item> leftItems, rightItems;
             Store::LoadItemsFrom(userDir + L"\\store.dat", leftItems);
             Store::LoadItemsFrom(progDir + L"\\store.dat", rightItems);
-            // Dedup by hash: pinned group + unpinned group
             std::vector<Item> merged;
-            std::vector<uint64_t> seen;
-            auto addUnique = [&](const std::vector<Item>& items) {
+            // Pinned items are deliberately NOT deduped — each pinned entry in
+            // each store represents an explicit user choice in an independent
+            // environment, and losing one looks like "a pinned item vanished"
+            // after a merge (reported issue scenario). Unpinned history is
+            // still deduped by content hash to avoid doubling archive size.
+            std::vector<uint64_t> seenUnpinned;
+            auto addPinned = [&](const std::vector<Item>& items) {
                 for (const Item& it : items) {
+                    if (it.pinned) merged.push_back(it);
+                }
+            };
+            auto addUnpinnedUnique = [&](const std::vector<Item>& items) {
+                for (const Item& it : items) {
+                    if (it.pinned) continue;
                     bool dup = false;
-                    for (uint64_t h : seen) {
+                    for (uint64_t h : seenUnpinned) {
                         if (h == it.hash) { dup = true; break; }
                     }
                     if (!dup) {
-                        seen.push_back(it.hash);
+                        seenUnpinned.push_back(it.hash);
                         merged.push_back(it);
                     }
                 }
             };
-            // Pinned first (from both), then unpinned (from both)
             std::vector<Item> lp, rp, lu, ru;
             for (auto& it : leftItems) { if (it.pinned) lp.push_back(std::move(it)); else lu.push_back(std::move(it)); }
             for (auto& it : rightItems) { if (it.pinned) rp.push_back(std::move(it)); else ru.push_back(std::move(it)); }
-            addUnique(lp);
-            addUnique(rp);
-            addUnique(lu);
-            addUnique(ru);
+            addPinned(lp);
+            addPinned(rp);
+            addUnpinnedUnique(lu);
+            addUnpinnedUnique(ru);
+            // Reassign all ids monotonically to eliminate potential id
+            // collisions between the two independent stores (each side owns
+            // its own id counter space).
+            uint64_t nextId = 1;
+            for (Item& it : merged) {
+                it.id = nextId++;
+            }
             // Serialize and write to dst
             std::vector<uint8_t> buf = Store::SerializeItems(merged);
             WriteFileAtomic(dstDat, buf.data(), buf.size());
@@ -395,7 +411,7 @@ Theme MakeTheme(bool dark) {
     Theme t{};
     if (dark) {
         t.bg = RGB(32, 32, 32);
-        t.bgAlt = RGB(40, 48, 62);   // Pinned area: bluish background, distinct from normal rows
+        t.bgAlt = RGB(40, 48, 62);
         t.fg = RGB(240, 240, 240);
         t.dim = RGB(150, 150, 150);
         t.sel = RGB(0, 95, 184);
@@ -404,7 +420,7 @@ Theme MakeTheme(bool dark) {
         t.accent = RGB(120, 175, 255);
     } else {
         t.bg = RGB(252, 252, 252);
-        t.bgAlt = RGB(228, 238, 252);  // Pinned area: light blue background, clearly distinguishable
+        t.bgAlt = RGB(228, 238, 252);  // Pinned row background: #e4eefc
         t.fg = RGB(28, 28, 28);
         t.dim = RGB(120, 120, 120);
         t.sel = RGB(0, 120, 215);

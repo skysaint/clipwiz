@@ -69,6 +69,7 @@ private:
         SavingInProgress    // Async save in progress
     };
     SaveState saveState_ = SaveState::NoSaveNeeded;
+    bool saveDirty_ = false;
 
     HINSTANCE inst_ = nullptr;
     HWND hwnd_ = nullptr;

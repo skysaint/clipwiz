@@ -55,6 +55,14 @@ struct State {
     int pinW = 0;  // Pin icon reserved width
     int fontMainH = 0;
     int fontSmallH = 0;
+    int sortBtnsW = 0;  // Width for 4 pinned-item sort icons at row end
+
+    // Interaction state
+    bool closeHover = false;  // Mouse hovering X button
+    bool mouseTracking = false;
+    POINT lastPt = {};       // Last mouse pos in client coords
+    int hoverRow = -1;       // Which row is mouse over (for sort button hover feedback)
+    int hoverSortBtn = -1;   // 0..3: which sort icon is hovered, -1 none
 
     std::vector<Row> rows;
     int sel = -1;
@@ -137,8 +145,8 @@ void CalcMetrics() {
     g.scrollW = std::max(g.scrollW, util::Scale(14, g.dpi));
 
     g.pad = std::max(util::Scale(8, g.dpi), g.fontMainH / 2);
-    g.titleH = std::max(util::Scale(26, g.dpi), g.fontMainH + g.pad);
-    g.editH = std::max(util::Scale(24, g.dpi), g.fontMainH + g.pad + util::Scale(2, g.dpi));
+    g.titleH = std::max(util::Scale(28, g.dpi), g.fontMainH + g.pad);
+    g.editH = std::max(util::Scale(26, g.dpi), g.fontMainH + g.pad + util::Scale(2, g.dpi));
     g.rowH = std::max(util::Scale(30, g.dpi), g.fontMainH + g.pad + util::Scale(6, g.dpi));
     g.hintH = std::max(util::Scale(18, g.dpi), g.fontSmallH + util::Scale(6, g.dpi));
     g.indexW = std::max(util::Scale(20, g.dpi),
@@ -148,10 +156,30 @@ void CalcMetrics() {
                          MeasureTextWidth(g.fontSmall, L"Ctrl+Shift+Alt+PgDn") +
                              util::Scale(12, g.dpi));
     g.pinW = std::max(util::Scale(14, g.dpi), util::Scale(12, g.dpi));
+    // 4 sort icons (MoveToTop / MoveUp / MoveDown / MoveToBottom) on pinned rows only.
+    // Keep icons compact so they don't eat too much row text space.
+    int btnSize = util::Scale(12, g.dpi);
+    int btnCap = g.rowH - g.pad;
+    if (btnSize > btnCap) btnSize = btnCap;
+    int btnGap = util::Scale(2, g.dpi);
+    int btnMargin = util::Scale(3, g.dpi);
+    g.sortBtnsW = btnSize * 4 + btnGap * 3 + btnMargin * 2;
+
     int minTextW = std::max({util::Scale(240, g.dpi), titleTextW + util::Scale(36, g.dpi),
                              hintTextW + util::Scale(20, g.dpi), filterHintW + util::Scale(20, g.dpi)});
+    // NOTE: sortBtnsW is NOT added to the overall popup width here. The 4
+    // reorder buttons live inside a pinned row's horizontal space, between
+    // the truncated row text and the right edge (scrollbar side). i.e. they
+    // *eat into* the text area of pinned rows only (exactly as UX asked:
+    // pinned rows get a shorter text display + ellipsis, unpinned rows
+    // keep full width).
+    // NOTE 2: hotkeyW is also NOT added to the layout sum because per-row
+    // hotkey labels are NOT rendered on the right edge of individual rows
+    // (per-row hotkeys are shown only in the bottom global hint bar).
+    // Adding either on top would force the whole popup wider and leave
+    // ugly empty trailing space on the right for unpinned rows.
     g.width = std::max(util::Scale(520, g.dpi),
-                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + g.hotkeyW + minTextW) + g.scrollW;
+                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + minTextW) + g.scrollW;
 }
 
 int ListTop() { return g.titleH + g.pad + g.editH + g.pad / 2; }
@@ -341,8 +369,22 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
         return;
     }
     const bool selected = index == g.sel;
+    const bool dark = theme.bg < RGB(128, 128, 128);
 
-    HBRUSH back = CreateSolidBrush(selected ? theme.sel : (row.pinned ? theme.bgAlt : theme.bg));
+    // Hard-coded pinned-row background per theme, kept in lockstep with
+    // PaintAll's palette so we don't accidentally diverge after theme switch.
+    const COLORREF K_PIN_BG_LIGHT = RGB(0xe4, 0xee, 0xfc); // #E4EEFC
+    const COLORREF K_PIN_BG_DARK  = RGB(0x2a, 0x3a, 0x52); // #2A3A52
+
+    COLORREF rowBg;
+    if (selected) {
+        rowBg = theme.sel;
+    } else if (row.pinned) {
+        rowBg = dark ? K_PIN_BG_DARK : K_PIN_BG_LIGHT;
+    } else {
+        rowBg = theme.bg;
+    }
+    HBRUSH back = CreateSolidBrush(rowBg);
     FillRect(dc, &rc, back);
     DeleteObject(back);
     SetBkMode(dc, TRANSPARENT);
@@ -368,9 +410,19 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
               DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
 
     // Text area
+    // IMPORTANT: do NOT reserve a "hotkey strip" (g.hotkeyW) in row layout —
+    // the current design does not render per-row hotkey labels on the right
+    // edge of rows (confirmed by user screenshot showing blank trailing space
+    // whenever we subtract hotkeyW). Hotkeys are documented only in the
+    // bottom global hint bar. Only pinned rows give up horizontal space:
+    // their text is truncated earlier so the 4 reorder icons fit cleanly
+    // between the ellipsis and the right edge of the row (before scrollbar).
     RECT textRc = rc;
     textRc.left = indexRc.right + g.pad / 2;
-    textRc.right = rc.right - g.hotkeyW - g.pad / 2;
+    textRc.right = rc.right - g.pad / 2;
+    if (row.pinned) {
+        textRc.right -= g.sortBtnsW;
+    }
 
     if (item->kind == ItemKind::Image) {
         const Thumb* thumb = GetThumb(item->id);
@@ -407,8 +459,92 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 }
 
+// Helpers for hit-testing
+static inline bool PtInRect(int x, int y, const RECT& r) {
+    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+}
+
+static RECT CloseButtonRect() {
+    RECT r = {g.width - g.titleH, 0, g.width, g.titleH};
+    return r;
+}
+
+// Returns 0..3 for the 4 pinned-row sort buttons (First/Up/Down/Last), -1 if none
+// Indices map to left-to-right visual order (First = leftmost, Last = rightmost).
+// `buttonsRight` is the X coordinate of the RIGHT edge of the sort-button slot
+// (i.e. the left edge of the hotkey strip minus the gap padding), so icons sit
+// cleanly between the truncated text and the hotkey label.
+static int HitTestSortButton(const Row& row, int buttonsRight, int rowTop, int x, int y, RECT* outBtnRect = nullptr) {
+    if (!row.pinned) return -1;
+    int btnSize = util::Scale(12, g.dpi);
+    int btnCap = g.rowH - g.pad;
+    if (btnSize > btnCap) btnSize = btnCap;
+    int cy = rowTop + (g.rowH - btnSize) / 2;
+    int btnGap = util::Scale(2, g.dpi);
+    int btnMargin = util::Scale(3, g.dpi);
+    int slotLeft = buttonsRight - g.sortBtnsW;
+    int cx[4];
+    cx[0] = slotLeft + btnMargin;
+    cx[1] = cx[0] + btnSize + btnGap;
+    cx[2] = cx[1] + btnSize + btnGap;
+    cx[3] = cx[2] + btnSize + btnGap;
+    for (int i = 0; i < 4; ++i) {
+        RECT br = {cx[i], cy, cx[i] + btnSize, cy + btnSize};
+        if (x >= br.left && x < br.right && y >= br.top && y < br.bottom) {
+            if (outBtnRect) *outBtnRect = br;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Fills rects[0..3] with the screen-space button rects for a pinned row.
+// Left-to-right order: rects[0]=First (to top), rects[1]=Up, rects[2]=Down, rects[3]=Last (to bottom).
+// See HitTestSortButton for the `buttonsRight` semantics.
+static void SortButtonRects(int buttonsRight, int rowTop, RECT rects[4]) {
+    int btnSize = util::Scale(12, g.dpi);
+    int btnCap = g.rowH - g.pad;
+    if (btnSize > btnCap) btnSize = btnCap;
+    int cy = rowTop + (g.rowH - btnSize) / 2;
+    int btnGap = util::Scale(2, g.dpi);
+    int btnMargin = util::Scale(3, g.dpi);
+    int slotLeft = buttonsRight - g.sortBtnsW;
+    int cx[4];
+    cx[0] = slotLeft + btnMargin;
+    cx[1] = cx[0] + btnSize + btnGap;
+    cx[2] = cx[1] + btnSize + btnGap;
+    cx[3] = cx[2] + btnSize + btnGap;
+    for (int i = 0; i < 4; ++i) {
+        rects[i].left = cx[i];
+        rects[i].top = cy;
+        rects[i].right = cx[i] + btnSize;
+        rects[i].bottom = cy + btnSize;
+    }
+}
+
 void PaintAll(HDC target, const RECT& client) {
     const util::Theme& theme = g.host->GetTheme();
+    const bool dark = theme.bg < RGB(128, 128, 128);
+
+    // Hard-coded brand palette (asymmetric light/dark, matching UX-specified
+    // light-mode colors exactly; dark-mode derived via HSL inversion so the
+    // visual hierarchy stays consistent while honoring dark-mode ergonomics:
+    //   * Same hue family (cool blue 207-216°) for "brand blue" surfaces,
+    //     so the product identity stays stable on theme toggle.
+    //   * Luminance inverted: light backgrounds (L≈92-96%) become deep
+    //     navy surfaces (L≈22-28%); dark foreground (L≈35%) becomes pale
+    //     sky-blue (L≈70%), keeping WCAG AA contrast on every pairing.
+    //   * Saturation dialed back ~30% in dark to avoid eye fatigue.
+    //   * Close-hover red is the same #E81123 in both modes (OS semantic).
+    const COLORREF K_TITLE_LIGHT       = RGB(0xd3, 0xe3, 0xfd);   // HSL(214° 85% 92%)  #D3E3FD
+    const COLORREF K_TITLE_DARK        = RGB(0x1f, 0x36, 0x56);   // HSL(214° 55% 22%)  #1F3656
+    const COLORREF K_EDIT_LIGHT        = RGB(0xed, 0xf2, 0xfa);   // HSL(216° 50% 96%)  #EDF2FA
+    const COLORREF K_EDIT_DARK         = RGB(0x37, 0x4b, 0x63);   // HSL(216° 35% 28%)  #374B63
+    const COLORREF K_CLOSE_HOVER       = RGB(0xe8, 0x11, 0x23);   // Semantic red      #E81123
+    const COLORREF K_PIN_SORT_FG_LIGHT = RGB(0x2c, 0x5f, 0x8a);   // HSL(207° 51% 35%)  #2C5F8A
+    const COLORREF K_PIN_SORT_FG_DARK  = RGB(0x9b, 0xc1, 0xe5);   // HSL(207° 45% 70%)  #9BC1E5
+    const COLORREF K_PIN_BTN_HOVER_LIGHT = RGB(0xcc, 0xde, 0xf5); // Hover pill (light) #CCDEF5
+    const COLORREF K_PIN_BTN_HOVER_DARK  = RGB(0x38, 0x55, 0x7a); // Hover pill (dark)  #38557A
 
     // Double buffering
     HDC mem = CreateCompatibleDC(target);
@@ -420,9 +556,11 @@ void PaintAll(HDC target, const RECT& client) {
     FillRect(mem, &client, bgBrush);
     DeleteObject(bgBrush);
 
-    // Title bar
+    // Title bar: UX-specified light-blue for light mode; symmetric deep-navy
+    // for dark mode (same hue family, luminance inverted).
     RECT titleRc = {0, 0, client.right, g.titleH};
-    HBRUSH titleBrush = CreateSolidBrush(theme.bgAlt);
+    COLORREF titleBg = dark ? K_TITLE_DARK : K_TITLE_LIGHT;
+    HBRUSH titleBrush = CreateSolidBrush(titleBg);
     FillRect(mem, &titleRc, titleBrush);
     DeleteObject(titleBrush);
     SetBkMode(mem, TRANSPARENT);
@@ -430,18 +568,43 @@ void PaintAll(HDC target, const RECT& client) {
     SetTextColor(mem, theme.fg);
     RECT titleText = {g.pad, 0, client.right - g.titleH, g.titleH};
     DrawTextW(mem, i18n::T("popup.title"), -1, &titleText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    // X button
-    int xSize = std::max(util::Scale(12, g.dpi), g.titleH / 2);
-    int xPad = (g.titleH - xSize) / 2;
-    HPEN xPen = CreatePen(PS_SOLID, util::Scale(1, g.dpi), theme.dim);
-    HGDIOBJ oldPen = SelectObject(mem, xPen);
-    int xRight = client.right - xPad;
-    MoveToEx(mem, xRight - xSize, xPad, nullptr);
-    LineTo(mem, xRight, xPad + xSize);
-    MoveToEx(mem, xRight, xPad, nullptr);
-    LineTo(mem, xRight - xSize, xPad + xSize);
-    SelectObject(mem, oldPen);
-    DeleteObject(xPen);
+
+    // Close button (standard 46px titlebar button style). Hover => red fill
+    // + white "X"; normal => text-colored "X" on title background.
+    {
+        RECT cRc = CloseButtonRect();
+        COLORREF fill = g.closeHover ? K_CLOSE_HOVER : titleBg;
+        HBRUSH cb = CreateSolidBrush(fill);
+        FillRect(mem, &cRc, cb);
+        DeleteObject(cb);
+        int size = std::max(util::Scale(10, g.dpi), g.titleH / 3);
+        int padX = (cRc.right - cRc.left - size) / 2;
+        int padY = (cRc.bottom - cRc.top - size) / 2;
+        COLORREF xc = g.closeHover ? RGB(255, 255, 255) : theme.fg;
+        HPEN xPen = CreatePen(PS_SOLID, std::max(1, util::Scale(1, g.dpi)), xc);
+        HGDIOBJ oldPen = SelectObject(mem, xPen);
+        int x0 = cRc.left + padX;
+        int y0 = cRc.top + padY;
+        int x1 = cRc.right - padX;
+        int y1 = cRc.bottom - padY;
+        MoveToEx(mem, x0, y0, nullptr);
+        LineTo(mem, x1, y1);
+        MoveToEx(mem, x1, y0, nullptr);
+        LineTo(mem, x0, y1);
+        SelectObject(mem, oldPen);
+        DeleteObject(xPen);
+    }
+
+    // Edit box background (matches title hue, one luminance step brighter in
+    // light, one step dimmer in dark so the search field reads as a discrete
+    // surface rather than a bordered hole).
+    {
+        RECT er = {g.pad, g.titleH + g.pad / 2, g.width - g.pad, g.titleH + g.pad / 2 + g.editH};
+        COLORREF editBg = dark ? K_EDIT_DARK : K_EDIT_LIGHT;
+        HBRUSH eb = CreateSolidBrush(editBg);
+        FillRect(mem, &er, eb);
+        DeleteObject(eb);
+    }
 
     // List area
     RECT list = ListRect();
@@ -456,14 +619,92 @@ void PaintAll(HDC target, const RECT& client) {
         DrawRow(mem, rowRc, i, theme);
     }
 
+    // Sort icons + hover highlight for pinned rows (painted on top of rows)
+    {
+        COLORREF fg = dark ? K_PIN_SORT_FG_DARK : K_PIN_SORT_FG_LIGHT;
+        HPEN pn = CreatePen(PS_SOLID, std::max(1, util::Scale(1, g.dpi)), fg);
+        HGDIOBJ op = SelectObject(mem, pn);
+        for (int i = g.top; i < end; ++i) {
+            const Row& row = g.rows[static_cast<size_t>(i)];
+            if (!row.pinned) continue;
+            RECT rowRc;
+            rowRc.left = list.left;
+            rowRc.right = list.right;
+            rowRc.top = list.top + (i - g.top) * g.rowH;
+            rowRc.bottom = rowRc.top + g.rowH;
+            RECT brs[4];
+            // Sort-button slot sits flush against the right edge of the row
+            // (minus a small pad so the last icon doesn't kiss the scrollbar).
+            // No separate hotkey strip is reserved on rows; per-row hotkey
+            // hints live only in the bottom global hint bar.
+            int buttonsRight = rowRc.right - g.pad / 2;
+            SortButtonRects(buttonsRight, rowRc.top, brs);
+            for (int b = 0; b < 4; ++b) {
+                RECT br = brs[b];
+                bool hover = (g.hoverRow == i && g.hoverSortBtn == b);
+                if (hover) {
+                    HBRUSH hb = CreateSolidBrush(dark ? K_PIN_BTN_HOVER_DARK : K_PIN_BTN_HOVER_LIGHT);
+                    RECT hbRc = br;
+                    InflateRect(&hbRc, util::Scale(1, g.dpi), util::Scale(1, g.dpi));
+                    FillRect(mem, &hbRc, hb);
+                    DeleteObject(hb);
+                }
+                int cx = br.left + (br.right - br.left) / 2;
+                int cy = br.top + (br.bottom - br.top) / 2;
+                int w = (br.right - br.left) * 3 / 4;
+                int h = (br.bottom - br.top) * 3 / 4;
+                switch (b) {
+                    case 0: {  // First (move to top): double upward chevrons
+                        int ay = cy;
+                        // Upper chevron
+                        MoveToEx(mem, cx - w / 2, ay, nullptr);
+                        LineTo(mem, cx, ay - h / 2);
+                        LineTo(mem, cx + w / 2, ay);
+                        // Lower chevron
+                        MoveToEx(mem, cx - w / 2, ay + h / 3, nullptr);
+                        LineTo(mem, cx, ay - h / 6);
+                        LineTo(mem, cx + w / 2, ay + h / 3);
+                        break;
+                    }
+                    case 1: {  // Up: single upward chevron
+                        MoveToEx(mem, cx - w / 2, cy + h / 3, nullptr);
+                        LineTo(mem, cx, cy - h / 3);
+                        LineTo(mem, cx + w / 2, cy + h / 3);
+                        break;
+                    }
+                    case 2: {  // Down: single downward chevron
+                        MoveToEx(mem, cx - w / 2, cy - h / 3, nullptr);
+                        LineTo(mem, cx, cy + h / 3);
+                        LineTo(mem, cx + w / 2, cy - h / 3);
+                        break;
+                    }
+                    case 3: {  // Last (move to bottom): double downward chevrons
+                        int ay = cy;
+                        // Upper chevron
+                        MoveToEx(mem, cx - w / 2, ay - h / 3, nullptr);
+                        LineTo(mem, cx, ay + h / 6);
+                        LineTo(mem, cx + w / 2, ay - h / 3);
+                        // Lower chevron
+                        MoveToEx(mem, cx - w / 2, ay, nullptr);
+                        LineTo(mem, cx, ay + h / 2);
+                        LineTo(mem, cx + w / 2, ay);
+                        break;
+                    }
+                }
+            }
+        }
+        SelectObject(mem, op);
+        DeleteObject(pn);
+    }
+
     // Drag reorder insert line
     if (g.reorderDrag && g.reorderInsert >= 0) {
         int y = list.top + (g.reorderInsert - g.top) * g.rowH;
         HPEN linePen = CreatePen(PS_SOLID, 2, theme.accent);
-        HGDIOBJ op = SelectObject(mem, linePen);
+        HGDIOBJ op2 = SelectObject(mem, linePen);
         MoveToEx(mem, list.left, y, nullptr);
         LineTo(mem, list.right, y);
-        SelectObject(mem, op);
+        SelectObject(mem, op2);
         DeleteObject(linePen);
     }
 
@@ -484,11 +725,11 @@ void PaintAll(HDC target, const RECT& client) {
 
     // Border
     HPEN borderPen = CreatePen(PS_SOLID, 1, theme.line);
-    HGDIOBJ op2 = SelectObject(mem, borderPen);
-    HGDIOBJ ob2 = SelectObject(mem, GetStockObject(NULL_BRUSH));
+    HGDIOBJ op3 = SelectObject(mem, borderPen);
+    HGDIOBJ ob3 = SelectObject(mem, GetStockObject(NULL_BRUSH));
     Rectangle(mem, 0, 0, client.right, client.bottom);
-    SelectObject(mem, op2);
-    SelectObject(mem, ob2);
+    SelectObject(mem, op3);
+    SelectObject(mem, ob3);
     DeleteObject(borderPen);
 
     BitBlt(target, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
@@ -893,11 +1134,14 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_CTLCOLOREDIT: {
             HDC hdc = reinterpret_cast<HDC>(wparam);
             const util::Theme& theme = g.host->GetTheme();
+            bool dark = theme.bg < RGB(128, 128, 128);
+            const COLORREF K_EDIT_LIGHT = RGB(0xed, 0xf2, 0xfa); // #EDF2FA
+            const COLORREF K_EDIT_DARK  = RGB(0x37, 0x4b, 0x63); // #374B63
+            COLORREF editBg = dark ? K_EDIT_DARK : K_EDIT_LIGHT;
             SetTextColor(hdc, theme.fg);
-            SetBkColor(hdc, theme.bgAlt);
-            if (!g.editBg) {
-                g.editBg = CreateSolidBrush(theme.bgAlt);
-            }
+            SetBkColor(hdc, editBg);
+            if (g.editBg) { DeleteObject(g.editBg); g.editBg = nullptr; }
+            g.editBg = CreateSolidBrush(editBg);
             return reinterpret_cast<LRESULT>(g.editBg);
         }
         case WM_NCHITTEST: {
@@ -932,11 +1176,50 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_LBUTTONDOWN: {
             int y = GET_Y_LPARAM(lparam);
             int x = GET_X_LPARAM(lparam);
-            // List area click
+            // Close button click
+            RECT closeRc = CloseButtonRect();
+            if (PtInRect(x, y, closeRc)) {
+                Hide();
+                return 0;
+            }
+            // Sort button click on pinned row
             RECT list = ListRect();
             if (y >= list.top && y < list.bottom && x >= list.left && x < list.right) {
                 int idx = g.top + (y - list.top) / g.rowH;
                 if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
+                    const Row& r = g.rows[static_cast<size_t>(idx)];
+                    RECT rowRc;
+                    rowRc.left = list.left;
+                    rowRc.right = list.right;
+                    rowRc.top = list.top + (idx - g.top) * g.rowH;
+                    rowRc.bottom = rowRc.top + g.rowH;
+                    int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, x, y);
+                    if (b >= 0 && r.pinned) {
+                        int pinnedCount = 0;
+                        for (const auto& rr : g.rows) {
+                            if (rr.pinned) ++pinnedCount;
+                        }
+                        int current = -1;
+                        for (int i = 0; i < pinnedCount; ++i) {
+                            if (g.rows[static_cast<size_t>(i)].id == r.id) { current = i; break; }
+                        }
+                        if (current >= 0) {
+                            int target = current;
+                            switch (b) {
+                                case 0: target = 0; break;
+                                case 1: target = std::max(0, current - 1); break;
+                                case 2: target = std::min(std::max(0, pinnedCount - 1), current + 1); break;
+                                case 3: target = std::max(0, pinnedCount - 1); break;
+                            }
+                            if (target != current) {
+                                g.host->GetStore().MovePinnedTo(r.id, target);
+                                OnDataChanged();
+                            }
+                        }
+                        g.sel = idx;
+                        Redraw();
+                        return 0;
+                    }
                     g.sel = idx;
                     Redraw();
                     // Start drag reorder in pinned area
@@ -951,14 +1234,57 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEMOVE: {
+            int mx = GET_X_LPARAM(lparam);
+            int my = GET_Y_LPARAM(lparam);
+            g.lastPt = {mx, my};
+            if (!g.mouseTracking) {
+                TRACKMOUSEEVENT tme = {sizeof(tme)};
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                g.mouseTracking = true;
+            }
+            bool newCloseHover = false;
+            int newHoverRow = -1;
+            int newHoverBtn = -1;
+            RECT closeRc = CloseButtonRect();
+            if (PtInRect(mx, my, closeRc)) {
+                newCloseHover = true;
+            } else {
+                RECT list = ListRect();
+                if (mx >= list.left && mx < list.right && my >= list.top && my < list.bottom) {
+                    int idx = g.top + (my - list.top) / g.rowH;
+                    if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
+                        const Row& r = g.rows[static_cast<size_t>(idx)];
+                        if (r.pinned) {
+                            RECT rowRc;
+                            rowRc.left = list.left;
+                            rowRc.right = list.right;
+                            rowRc.top = list.top + (idx - g.top) * g.rowH;
+                            rowRc.bottom = rowRc.top + g.rowH;
+                            int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, mx, my);
+                            if (b >= 0) {
+                                newHoverRow = idx;
+                                newHoverBtn = b;
+                            }
+                        }
+                    }
+                }
+            }
+            if (newCloseHover != g.closeHover || newHoverRow != g.hoverRow || newHoverBtn != g.hoverSortBtn) {
+                g.closeHover = newCloseHover;
+                g.hoverRow = newHoverRow;
+                g.hoverSortBtn = newHoverBtn;
+                Redraw();
+            }
             if (g.reorderDrag) {
                 RECT list = ListRect();
-                int y = GET_Y_LPARAM(lparam);
+                int y = my;
                 int rel = y - list.top;
                 int insertIdx = g.top + std::clamp(rel / g.rowH, 0, g.host->RowsVisible());
                 int pinnedCount = 0;
-                for (const auto& r : g.rows) {
-                    if (r.pinned) ++pinnedCount;
+                for (const auto& rr : g.rows) {
+                    if (rr.pinned) ++pinnedCount;
                 }
                 insertIdx = std::clamp(insertIdx, 0, pinnedCount);
                 g.reorderInsert = insertIdx;
@@ -968,16 +1294,15 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             // Ctrl+hover preview
             if (GetKeyState(VK_CONTROL) & 0x8000) {
                 RECT list = ListRect();
-                int x = GET_X_LPARAM(lparam);
-                int y = GET_Y_LPARAM(lparam);
+                int x = mx;
+                int y = my;
                 if (x >= list.left && x < list.right && y >= list.top && y < list.bottom) {
                     int idx = g.top + (y - list.top) / g.rowH;
                     if (idx != g.previewRow && idx >= 0 &&
                         static_cast<size_t>(idx) < g.rows.size()) {
                         HidePreview();
                         g.previewTimer = SetTimer(hwnd, 2, 300, nullptr);
-                        g.previewRow = -2;  // Mark as waiting
-                        // Store target row
+                        g.previewRow = -2;
                         SetPropW(hwnd, L"PreviewIdx", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(idx)));
                     }
                 } else {
@@ -985,6 +1310,16 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
             } else {
                 HidePreview();
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            g.mouseTracking = false;
+            if (g.closeHover || g.hoverRow >= 0 || g.hoverSortBtn >= 0) {
+                g.closeHover = false;
+                g.hoverRow = -1;
+                g.hoverSortBtn = -1;
+                Redraw();
             }
             return 0;
         }
@@ -1234,6 +1569,51 @@ void Show() {
     }
     if (attached) {
         AttachThreadInput(myThread, fgThread, FALSE);
+    }
+    // Reset hover state so stale hovered-red/blue backgrounds never carry over
+    // from the previous Show() session; also re-enable mouse-leave tracking.
+    g.closeHover = false;
+    g.hoverRow = -1;
+    g.hoverSortBtn = -1;
+    if (g.mouseTracking) {
+        // Cancel old TME_LEAVE tracking, we will re-register on the first
+        // WM_MOUSEMOVE we receive after the window is shown.
+        TRACKMOUSEEVENT tme = {sizeof(tme)};
+        tme.dwFlags = TME_LEAVE | TME_CANCEL;
+        tme.hwndTrack = g.hwnd;
+        TrackMouseEvent(&tme);
+        g.mouseTracking = false;
+    }
+    // Probe current cursor position: if the mouse is already over the popup
+    // area when it appears, force-sync hover state now so the close button
+    // / sort-icon hover renders correctly even before the first WM_MOUSEMOVE.
+    POINT pt = {};
+    if (GetCursorPos(&pt)) {
+        ScreenToClient(g.hwnd, &pt);
+        RECT closeRc = CloseButtonRect();
+        if (PtInRect(pt.x, pt.y, closeRc)) {
+            g.closeHover = true;
+        } else {
+            RECT list = ListRect();
+            if (pt.x >= list.left && pt.x < list.right && pt.y >= list.top && pt.y < list.bottom) {
+                int idx = g.top + (pt.y - list.top) / g.rowH;
+                if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
+                    const Row& r = g.rows[static_cast<size_t>(idx)];
+                    if (r.pinned) {
+                        RECT rowRc;
+                        rowRc.left = list.left;
+                        rowRc.right = list.right;
+                        rowRc.top = list.top + (idx - g.top) * g.rowH;
+                        rowRc.bottom = rowRc.top + g.rowH;
+                        int b = HitTestSortButton(r, rowRc.right - g.pad / 2, rowRc.top, pt.x, pt.y);
+                        if (b >= 0) {
+                            g.hoverRow = idx;
+                            g.hoverSortBtn = b;
+                        }
+                    }
+                }
+            }
+        }
     }
     Redraw();
 }

@@ -216,12 +216,36 @@ LRESULT App::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
 
         case WM_QUERYENDSESSION:
-            SaveNow();
+            // Best-effort synchronous snapshot so the dat file is consistent
+            // even if the user later confirms shutdown. Do NOT stop the
+            // writer here — Windows can still cancel shutdown after
+            // QUERYENDSESSION returns TRUE and the app keeps running.
+            KillTimer(hwnd, kTimerSave);
+            KillTimer(hwnd, kTimerWriteCheck);
+            saveDirty_ = false;
+            store_.ExpireCheck();
+            {
+                std::vector<uint8_t> buf = store_.Serialize();
+                util::WriteFileAtomic(util::StorePath(), buf.data(), buf.size());
+            }
+            saveState_ = SaveState::NoSaveNeeded;
             return TRUE;
 
         case WM_ENDSESSION:
             if (wparam) {
-                SaveNow();
+                // System confirmed shutdown/end session. Write synchronously
+                // again, and do NOT rely on async writers or WM_TIMER which
+                // may never be dispatched during fast shutdown.
+                KillTimer(hwnd, kTimerSave);
+                KillTimer(hwnd, kTimerWriteCheck);
+                saveDirty_ = false;
+                store_.ExpireCheck();
+                {
+                    std::vector<uint8_t> buf = store_.Serialize();
+                    util::WriteFileAtomic(util::StorePath(), buf.data(), buf.size());
+                }
+                saveState_ = SaveState::NoSaveNeeded;
+                writer_.Stop();
             }
             return 0;
 
@@ -437,7 +461,15 @@ void App::OnTimerSave() {
 void App::OnTimerWriteCheck() {
     if (writer_.Done()) {
         KillTimer(hwnd_, kTimerWriteCheck);
-        saveState_ = SaveState::NoSaveNeeded;
+        if (saveDirty_) {
+            saveDirty_ = false;
+            // New changes arrived while the previous write was in flight;
+            // immediately schedule another full save to catch them up.
+            saveState_ = SaveState::NoSaveNeeded;
+            ScheduleSave();
+        } else {
+            saveState_ = SaveState::NoSaveNeeded;
+        }
     }
 }
 
@@ -612,10 +644,12 @@ void App::ScheduleSave() {
     if (saveState_ == SaveState::NoSaveNeeded) {
         saveState_ = SaveState::PendingSave;
         SetTimer(hwnd_, kTimerSave, kSaveDelayMs, nullptr);
+    } else if (saveState_ == SaveState::SavingInProgress) {
+        // Async write is ongoing; mark dirty so OnTimerWriteCheck triggers a follow-up save
+        // once the current write finishes, ensuring no changes between submissions are lost.
+        saveDirty_ = true;
     }
-    // If currently PendingSave or SavingInProgress, do nothing
-    // PendingSave: timer already set, no need to set again
-    // SavingInProgress: async save in progress, new data will be overwritten
+    // PendingSave: timer already set, final serialization will use the latest in-memory state
 }
 
 void App::SaveNow() {
@@ -623,6 +657,9 @@ void App::SaveNow() {
     if (saveState_ == SaveState::PendingSave) {
         KillTimer(hwnd_, kTimerSave);
     }
+    
+    // Clear dirty flag (we are about to serialize the current latest state)
+    saveDirty_ = false;
     
     // Mark as saving in progress
     saveState_ = SaveState::SavingInProgress;
