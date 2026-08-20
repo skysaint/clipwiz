@@ -13,3 +13,4 @@ portable.txt
 *.sln
 *.vcxproj
 *.vcxproj.filters
+.workbuddy
