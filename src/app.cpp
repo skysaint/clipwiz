@@ -83,9 +83,12 @@ bool App::Init(HINSTANCE inst) {
         return false;
     }
 
+    // Set limits before loading so Load's internal Evict uses the user's configured limit,
+    // not the default 50. This prevents truncating history on startup.
+    store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
+
     // Load data
     Store::LoadResult lr = store_.Load();
-    store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
     if (lr == Store::LoadResult::Corrupt) {
         util::ErrorBox(nullptr, i18n::T("msg.corrupt_found"));
     }

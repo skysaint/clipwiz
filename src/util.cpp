@@ -115,8 +115,11 @@ bool MigrateDataDir(bool toPortable, HWND owner) {
         if (choice == ConflictChoice::UseMerged) {
             // Merge both, write to dst, remove src's
             std::vector<Item> leftItems, rightItems;
-            Store::LoadItemsFrom(userDir + L"\\store.dat", leftItems);
-            Store::LoadItemsFrom(progDir + L"\\store.dat", rightItems);
+            if (!Store::LoadItemsFrom(userDir + L"\\store.dat", leftItems) ||
+                !Store::LoadItemsFrom(progDir + L"\\store.dat", rightItems)) {
+                // Read failure: abort merge, preserve both source files
+                return false;
+            }
             std::vector<Item> merged;
             // Pinned items are deliberately NOT deduped — each pinned entry in
             // each store represents an explicit user choice in an independent

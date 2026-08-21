@@ -1191,7 +1191,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_COMMAND:
             if (HIWORD(wparam) == EN_CHANGE && reinterpret_cast<HWND>(lparam) == g.edit) {
                 Rebuild();
-                Redraw(true);
+                Redraw(false);  // Only invalidate list area, not the edit control
                 return 0;
             }
             break;
@@ -1336,10 +1336,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
             }
             if (newCloseHover != g.closeHover || newHoverRow != g.hoverRow || newHoverBtn != g.hoverSortBtn) {
+                const bool closeChanged = (newCloseHover != g.closeHover);
                 g.closeHover = newCloseHover;
                 g.hoverRow = newHoverRow;
                 g.hoverSortBtn = newHoverBtn;
-                Redraw(newCloseHover);
+                Redraw(closeChanged);  // Full redraw only when close button state changes
             }
             if (g.reorderDrag) {
                 RECT list = ListRect();
