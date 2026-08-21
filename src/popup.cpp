@@ -1167,6 +1167,13 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 Hide();
             }
             return 0;
+        case WM_COMMAND:
+            if (HIWORD(wparam) == EN_CHANGE && reinterpret_cast<HWND>(lparam) == g.edit) {
+                Rebuild();
+                Redraw(true);
+                return 0;
+            }
+            break;
         case WM_CTLCOLOREDIT: {
             HDC hdc = reinterpret_cast<HDC>(wparam);
             const util::Theme& theme = g.host->GetTheme();
@@ -1243,8 +1250,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                                 case 3: target = pinnedCount - 1; break;
                             }
                             if (target != current && target >= 0 && target < pinnedCount) {
-                                g.host->GetStore().MovePinnedTo(r.id, target);
-                                OnDataChanged();
+                                g.host->ReorderPinned(r.id, target);
                             }
                         }
                         g.sel = idx;
@@ -1310,11 +1316,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 g.closeHover = newCloseHover;
                 g.hoverRow = newHoverRow;
                 g.hoverSortBtn = newHoverBtn;
-                if (newCloseHover != g.closeHover || g.closeHover) {
-                    Redraw(true);
-                } else {
-                    Redraw(false);
-                }
+                Redraw(newCloseHover);
             }
             if (g.reorderDrag) {
                 RECT list = ListRect();
@@ -1365,8 +1367,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 ReleaseCapture();
                 if (g.reorderFrom >= 0 && g.reorderInsert >= 0 && g.reorderFrom != g.reorderInsert) {
                     uint64_t id = g.rows[static_cast<size_t>(g.reorderFrom)].id;
-                    g.host->GetStore().MovePinnedTo(id, g.reorderInsert);
-                    OnDataChanged();
+                    g.host->ReorderPinned(id, g.reorderInsert);
                 }
                 g.reorderFrom = -1;
                 g.reorderInsert = -1;

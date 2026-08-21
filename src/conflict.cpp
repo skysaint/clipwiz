@@ -27,6 +27,7 @@ struct ConflictState {
     std::wstring rightDir;
     std::vector<Item> leftItems;
     std::vector<Item> rightItems;
+    bool done = false;
 };
 
 ConflictState* g_state = nullptr;
@@ -90,7 +91,7 @@ LRESULT CALLBACK ConflictWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case WM_DESTROY:
             if (g_state->font) { DeleteObject(g_state->font); g_state->font = nullptr; }
             if (g_state->fontBold) { DeleteObject(g_state->fontBold); g_state->fontBold = nullptr; }
-            PostQuitMessage(0);
+            g_state->done = true;
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -108,7 +109,7 @@ ConflictChoice ShowConflictDialog(HWND parent, const std::wstring& leftDir, cons
     Store::LoadItemsFrom(rightDir + L"\\store.dat", state.rightItems);
 
     HINSTANCE inst = GetModuleHandleW(nullptr);
-    int dpi = util::DpiOf(parent);
+    int dpi = util::DpiOf(parent ? parent : GetDesktopWindow());
 
     // Register window class
     WNDCLASSEXW wc = {};
@@ -128,9 +129,15 @@ ConflictChoice ShowConflictDialog(HWND parent, const std::wstring& leftDir, cons
     int lblH = util::Scale(18, dpi);
     int listH = dlgH - pad * 2 - lblH * 3 - btnH * 2 - util::Scale(30, dpi);
 
-    // Center on parent
-    RECT prc;
-    GetWindowRect(parent, &prc);
+    // Center on parent; fall back to primary monitor work area if parent is null
+    RECT prc = {};
+    if (!parent || !GetWindowRect(parent, &prc) || (prc.left == 0 && prc.right == 0 && prc.top == 0 && prc.bottom == 0)) {
+        MONITORINFO mi = {sizeof(mi)};
+        HMONITOR mon = MonitorFromWindow(parent ? parent : GetForegroundWindow(),
+                                         MONITOR_DEFAULTTOPRIMARY);
+        if (mon) GetMonitorInfoW(mon, &mi);
+        prc = mi.rcWork;
+    }
     int x = (prc.left + prc.right - dlgW) / 2;
     int y = (prc.top + prc.bottom - dlgH) / 2;
 
@@ -231,16 +238,18 @@ ConflictChoice ShowConflictDialog(HWND parent, const std::wstring& leftDir, cons
     SendMessageW(btnM, WM_SETFONT, reinterpret_cast<WPARAM>(state.font), TRUE);
 
     // Modal loop
-    EnableWindow(parent, FALSE);
+    if (parent) EnableWindow(parent, FALSE);
     MSG msgLoop;
-    while (GetMessageW(&msgLoop, nullptr, 0, 0)) {
+    while (!state.done && GetMessageW(&msgLoop, nullptr, 0, 0)) {
         if (!IsDialogMessageW(hwnd, &msgLoop)) {
             TranslateMessage(&msgLoop);
             DispatchMessageW(&msgLoop);
         }
     }
-    EnableWindow(parent, TRUE);
-    SetForegroundWindow(parent);
+    if (parent) {
+        EnableWindow(parent, TRUE);
+        SetForegroundWindow(parent);
+    }
 
     UnregisterClassW(L"ClipWizConflict", inst);
     g_state = nullptr;

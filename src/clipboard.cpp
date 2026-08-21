@@ -447,7 +447,6 @@ bool WriteItem(HWND owner, const Item& item) {
         return false;
     }
     EmptyClipboard();
-    g_selfSeq = GetClipboardSequenceNumber();  // Record now; changes after SetClipboardData
 
     bool ok = false;
     switch (item.kind) {

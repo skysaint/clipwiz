@@ -92,7 +92,7 @@ bool IsPortable() {
     return DataDir() == ExeDir();
 }
 
-bool MigrateDataDir(bool toPortable) {
+bool MigrateDataDir(bool toPortable, HWND owner) {
     std::wstring src = DataDir();
     std::wstring dst = toPortable ? ExeDir() : AppDataDir();
     if (src == dst) {
@@ -108,7 +108,7 @@ bool MigrateDataDir(bool toPortable) {
     if (srcHas && dstHas) {
         std::wstring userDir = AppDataDir();
         std::wstring progDir = ExeDir();
-        ConflictChoice choice = ShowConflictDialog(nullptr, userDir, progDir);
+        ConflictChoice choice = ShowConflictDialog(owner, userDir, progDir);
         if (choice == ConflictChoice::Cancel) {
             return false;  // User aborted
         }
@@ -122,8 +122,7 @@ bool MigrateDataDir(bool toPortable) {
             // each store represents an explicit user choice in an independent
             // environment, and losing one looks like "a pinned item vanished"
             // after a merge (reported issue scenario). Unpinned history is
-            // still deduped by content hash to avoid doubling archive size.
-            std::vector<uint64_t> seenUnpinned;
+            // still deduped by kind+hash+data (consistent with Store::Add).
             auto addPinned = [&](const std::vector<Item>& items) {
                 for (const Item& it : items) {
                     if (it.pinned) merged.push_back(it);
@@ -133,11 +132,13 @@ bool MigrateDataDir(bool toPortable) {
                 for (const Item& it : items) {
                     if (it.pinned) continue;
                     bool dup = false;
-                    for (uint64_t h : seenUnpinned) {
-                        if (h == it.hash) { dup = true; break; }
+                    for (const Item& m : merged) {
+                        if (!m.pinned && m.kind == it.kind && m.hash == it.hash && m.data == it.data) {
+                            dup = true;
+                            break;
+                        }
                     }
                     if (!dup) {
-                        seenUnpinned.push_back(it.hash);
                         merged.push_back(it);
                     }
                 }
@@ -156,9 +157,15 @@ bool MigrateDataDir(bool toPortable) {
             for (Item& it : merged) {
                 it.id = nextId++;
             }
+            // Renumber orders preserving physical block order (left pinned, right pinned,
+            // left unpinned, right unpinned) without re-sorting by old order values.
+            Store::RenumberOrders(merged);
             // Serialize and write to dst
             std::vector<uint8_t> buf = Store::SerializeItems(merged);
-            WriteFileAtomic(dstDat, buf.data(), buf.size());
+            if (!WriteFileAtomic(dstDat, buf.data(), buf.size())) {
+                // Write failed: do NOT delete source, preserve both sides
+                return false;
+            }
             // Remove src's so it won't be moved over
             DeleteFileW(srcDat.c_str());
         } else {

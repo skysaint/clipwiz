@@ -32,7 +32,7 @@ const std::wstring& DataDir();
 void SetDataDir(const std::wstring& dir);
 std::wstring AppDataDir();          // %APPDATA%\ClipWiz
 bool IsPortable();                  // true if data lives next to exe
-bool MigrateDataDir(bool toPortable);  // Move data files between locations
+bool MigrateDataDir(bool toPortable, HWND owner);  // Move data files between locations
 std::wstring ConfigPath();
 std::wstring StorePath();
 bool EnsureDir(const std::wstring& dir);

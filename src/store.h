@@ -2,13 +2,15 @@
 //
 // Data durability rules:
 //   1. Auto-eviction / expiry only affects unpinned items
-//   2. History limit counts only unpinned items; pinned items don't consume quota
+//   2. Total item limit (maxTotal_) counts ALL items including pinned
 //   3. On store.dat validation failure, the file is renamed (never overwritten or cleared)
 //
 // Design notes:
 //   - All content (text/image/HTML/RTF/file list) stored uniformly as binary blob
 //   - Hotkeys are not tied to items; managed positionally via config
 //   - Pinned section maintains manual order, not reordered by usage
+//   - Item::pinned is the sole authority on section membership
+//   - order values: pinned [1..9999], unpinned [10001..]; maintained by Normalize
 #pragma once
 
 #include <windows.h>
@@ -30,8 +32,9 @@ struct Item {
     ItemKind kind = ItemKind::Text;
     bool pinned = false;
     uint32_t order = 0;         // Single global sort key:
-                                //   pinned items live in [1, kMaxPinnedOrder]
-                                //   unpinned items live in [kUnpinnedOrderBase, 0xFFFFFFFF]
+                                //   pinned items live in [1, 9999]
+                                //   unpinned items live in [10001, ...]
+                                //   Maintained contiguous by Normalize after every mutation.
                                 //   Zero = unassigned (filled in during initial load from
                                 //   legacy store files or at Add() time).
     uint64_t createdAt = 0;
@@ -74,7 +77,7 @@ public:
     // consistent with what the user actually sees on screen)
     int PinnedIndexOf(uint64_t id) const;
 
-    void SetLimits(int maxHistory, int expiryDays);
+    void SetLimits(int maxTotal, int expiryDays);
     void ExpireCheck();  // Remove expired unpinned items
 
     // Serialize to memory (called from main thread, very fast), then hand to AsyncWriter
@@ -84,7 +87,7 @@ public:
     uint64_t TotalDataSize() const;
 
     int PinnedCount() const;
-    int HistoryCount() const;
+    int TotalCount() const;  // All items (pinned + unpinned)
     const std::wstring& CorruptBackupPath() const { return corruptBackup_; }
 
     // Utility: extract text from item data (Text/Html/Rtf/FileDrop)
@@ -96,15 +99,18 @@ public:
     // Serialize a given item list to binary format (for merge output)
     static std::vector<uint8_t> SerializeItems(const std::vector<Item>& items);
 
+    // Renumber orders in-place preserving current physical order (for merge use)
+    static void RenumberOrders(std::vector<Item>& items);
+
 private:
     Item* FindMutable(uint64_t id);
-    void Reorder();
     void Evict();
+    bool EvictOneOldestUnpinned();
     LoadResult PreserveCorrupt();
 
-    std::vector<Item> items_;  // Pinned section first (manual order), then unpinned (usedAt desc)
+    std::vector<Item> items_;  // Pinned section first (order asc), then unpinned (order asc)
     uint64_t nextId_ = 1;
-    int maxHistory_ = 50;
+    int maxTotal_ = 50;    // Total item limit (pinned + unpinned), hard cap 9999
     int expiryDays_ = 0;
     std::wstring corruptBackup_;
 };

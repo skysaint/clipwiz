@@ -544,6 +544,13 @@ void App::MovePinned(uint64_t id, int delta) {
     }
 }
 
+void App::ReorderPinned(uint64_t id, int targetIndex) {
+    if (store_.MovePinnedTo(id, targetIndex)) {
+        popup::OnDataChanged();
+        ScheduleSave();
+    }
+}
+
 void App::SaveLastPos(int x, int y) {
     cfg_.lastPopupX = x;
     cfg_.lastPopupY = y;
@@ -564,7 +571,7 @@ void App::DumpConfigForCrash(int& maxHistory, int& expiryDays, int& popupHotkey,
     logLevelUtf8 = util::Narrow(cfg_.logLevel);
     storeCount = static_cast<int>(store_.Items().size());
     storePinned = store_.PinnedCount();
-    storeHistory = store_.HistoryCount();
+    storeHistory = store_.TotalCount() - store_.PinnedCount();
     storeTotalBytes = store_.TotalDataSize();
 }
 

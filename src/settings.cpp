@@ -310,7 +310,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     SendDlgItemMessageW(hwnd, IDC_DATADIR, CB_GETCURSEL, 0, 0));
                 bool wantPortable = (dataSel == 1);
                 if (wantPortable != util::IsPortable()) {
-                    util::MigrateDataDir(wantPortable);
+                    util::MigrateDataDir(wantPortable, hwnd);
                 }
                 g_resultOk = true;
                 EndDialog(hwnd, IDOK);
@@ -423,7 +423,7 @@ Config Defaults() {
 }
 
 void Clamp(Config& cfg) {
-    cfg.maxHistory = std::clamp(cfg.maxHistory, 5, 2000);
+    cfg.maxHistory = std::clamp(cfg.maxHistory, 5, 9999);
     cfg.expiryDays = std::clamp(cfg.expiryDays, 0, 3650);
     cfg.pasteDelayMs = std::clamp(cfg.pasteDelayMs, 0, 2000);
     cfg.rowsVisible = std::clamp(cfg.rowsVisible, 4, 25);

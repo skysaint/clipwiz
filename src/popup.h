@@ -28,6 +28,7 @@ public:
     virtual void TogglePin(uint64_t id) = 0;
     virtual void DeleteItem(uint64_t id) = 0;
     virtual void MovePinned(uint64_t id, int delta) = 0;
+    virtual void ReorderPinned(uint64_t id, int targetIndex) = 0;
     virtual void OpenSettings() = 0;
 
 protected:

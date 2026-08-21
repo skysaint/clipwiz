@@ -33,6 +33,7 @@ public:
     void TogglePin(uint64_t id) override;
     void DeleteItem(uint64_t id) override;
     void MovePinned(uint64_t id, int delta) override;
+    void ReorderPinned(uint64_t id, int targetIndex) override;
     void OpenSettings() override;
 
     // Snapshot read-only state for crash diagnostics.
