@@ -958,9 +958,10 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
         // Pinned item reorder
         if (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size() &&
             g.rows[static_cast<size_t>(g.sel)].pinned) {
+            uint64_t selId = g.rows[static_cast<size_t>(g.sel)].id;
             int delta = (vk == VK_UP) ? -1 : 1;
-            g.host->MovePinned(g.rows[static_cast<size_t>(g.sel)].id, delta);
-            g.sel += delta;
+            g.host->MovePinned(selId, delta);
+            OnDataChanged();
             EnsureVisible();
             UpdateScrollbar();
             Redraw(false);
@@ -971,12 +972,23 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
     if (ctrl && vk == 'P') {
         if (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size()) {
             g.host->TogglePin(g.rows[static_cast<size_t>(g.sel)].id);
+            OnDataChanged();
+            EnsureVisible();
+            UpdateScrollbar();
+            Redraw(false);
         }
         return true;
     }
     if (ctrl && (vk == 'D' || vk == VK_DELETE)) {
         if (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size()) {
-            g.host->DeleteItem(g.rows[static_cast<size_t>(g.sel)].id);
+            uint64_t selId = g.rows[static_cast<size_t>(g.sel)].id;
+            g.host->DeleteItem(selId);
+            OnDataChanged();
+            // If delete removed the last row, Rebuild() clamps sel to [0, rows.size()-1];
+            // we still want it visible.
+            EnsureVisible();
+            UpdateScrollbar();
+            Redraw(false);
         }
         return true;
     }
@@ -1019,6 +1031,7 @@ void ShowRowMenu(int index) {
     if (index < 0 || static_cast<size_t>(index) >= g.rows.size()) {
         return;
     }
+    g.sel = index;   // Rebuild() inside App::TogglePin/DeleteItem tracks THIS row via oldSelId.
     const Row& row = g.rows[static_cast<size_t>(index)];
     uint64_t rowId = row.id;
     HMENU menu = CreatePopupMenu();
@@ -1031,8 +1044,6 @@ void ShowRowMenu(int index) {
 
     POINT pt;
     GetCursorPos(&pt);
-    // Mark menu as modal so WM_ACTIVATE(INACTIVE) does not hide the popup
-    // out from under TrackPopupMenu (which itself temporarily deactivates it).
     BeginModal();
     int cmd = TrackPopupMenu(menu,
                              TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
@@ -1040,17 +1051,27 @@ void ShowRowMenu(int index) {
     EndModal();
     DestroyMenu(menu);
 
-    // Validate that the target item still exists in the same store after
-    // the menu closes (data could have been refreshed by another path).
-    const Item* item = (rowId != 0) ? g.host->GetStore().Find(rowId) : nullptr;
-    if (!item) {
-        return;
-    }
     switch (cmd) {
         case 1: g.host->CopyItem(rowId); break;
         case 2: g.host->PasteItem(rowId); break;
-        case 3: g.host->TogglePin(rowId); break;
-        case 4: g.host->DeleteItem(rowId); break;
+        case 3: {
+            if (g.host->GetStore().Find(rowId)) {
+                g.host->TogglePin(rowId);
+                EnsureVisible();
+                UpdateScrollbar();
+                Redraw(false);
+            }
+            break;
+        }
+        case 4: {
+            if (g.host->GetStore().Find(rowId)) {
+                g.host->DeleteItem(rowId);
+                EnsureVisible();
+                UpdateScrollbar();
+                Redraw(false);
+            }
+            break;
+        }
         default: break;
     }
 }
@@ -1250,10 +1271,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                                 case 3: target = pinnedCount - 1; break;
                             }
                             if (target != current && target >= 0 && target < pinnedCount) {
+                                g.sel = idx;  // so Rebuild() inside OnDataChanged tracks THIS row via oldSelId
                                 g.host->ReorderPinned(r.id, target);
                             }
+                        } else {
+                            g.sel = idx;
                         }
-                        g.sel = idx;
                         Redraw(false);
                         return 0;
                     }
@@ -1367,6 +1390,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 ReleaseCapture();
                 if (g.reorderFrom >= 0 && g.reorderInsert >= 0 && g.reorderFrom != g.reorderInsert) {
                     uint64_t id = g.rows[static_cast<size_t>(g.reorderFrom)].id;
+                    // Track the dragged row after Rebuild: pin g.sel to reorderFrom BEFORE OnDataChanged
+                    // (Rebuild's oldSelId mechanism then re-finds it by id at new position).
+                    g.sel = g.reorderFrom;
                     g.host->ReorderPinned(id, g.reorderInsert);
                 }
                 g.reorderFrom = -1;
