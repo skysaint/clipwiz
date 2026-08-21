@@ -1231,6 +1231,30 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;  // HTCAPTION: let DefWindowProc handle native dragging
         }
+        case WM_NCMOUSEMOVE: {
+            // Close button is in non-client area (HTCLOSE from WM_NCHITTEST),
+            // so hover must be tracked via WM_NCMOUSEMOVE, not WM_MOUSEMOVE.
+            bool inClose = (wparam == HTCLOSE);
+            if (inClose != g.closeHover) {
+                g.closeHover = inClose;
+                Redraw(true);
+            }
+            if (inClose) {
+                // Request TME_NONCLIENT leave notification so we clear hover when mouse exits
+                TRACKMOUSEEVENT tme = {sizeof(tme)};
+                tme.dwFlags = TME_LEAVE | TME_NONCLIENT;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+            }
+            return 0;
+        }
+        case WM_NCMOUSELEAVE: {
+            if (g.closeHover) {
+                g.closeHover = false;
+                Redraw(true);
+            }
+            return 0;
+        }
         case WM_EXITSIZEMOVE: {
             // Remember position after drag ends
             RECT rc;
@@ -1559,7 +1583,7 @@ bool Init(HINSTANCE inst, Host* host) {
     RegisterClassExW(&wc2);
 
     g.hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"ClipWizPopup", L"",
-                             WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, inst, nullptr);
+                             WS_POPUP | WS_CLIPCHILDREN, 0, 0, 100, 100, nullptr, nullptr, inst, nullptr);
     if (!g.hwnd) {
         return false;
     }

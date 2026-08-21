@@ -8,8 +8,6 @@
 #include <cstdio>
 
 #include "i18n.h"
-#include "conflict.h"
-#include "store.h"
 
 namespace util {
 namespace {
@@ -100,88 +98,14 @@ bool MigrateDataDir(bool toPortable, HWND owner) {
     }
     EnsureDir(dst);
 
-    // Handle store.dat conflict: both sides have one
-    std::wstring srcDat = src + L"\\store.dat";
+    // If destination already has store.dat, confirm overwrite
     std::wstring dstDat = dst + L"\\store.dat";
-    bool srcHas = GetFileAttributesW(srcDat.c_str()) != INVALID_FILE_ATTRIBUTES;
     bool dstHas = GetFileAttributesW(dstDat.c_str()) != INVALID_FILE_ATTRIBUTES;
-    if (srcHas && dstHas) {
-        std::wstring userDir = AppDataDir();
-        std::wstring progDir = ExeDir();
-        ConflictChoice choice = ShowConflictDialog(owner, userDir, progDir);
-        if (choice == ConflictChoice::Cancel) {
-            return false;  // User aborted
+    if (dstHas) {
+        if (!ConfirmBox(owner, i18n::T("migrate.overwrite_confirm"))) {
+            return false;  // User cancelled
         }
-        if (choice == ConflictChoice::UseMerged) {
-            // Merge both, write to dst, remove src's
-            std::vector<Item> leftItems, rightItems;
-            if (!Store::LoadItemsFrom(userDir + L"\\store.dat", leftItems) ||
-                !Store::LoadItemsFrom(progDir + L"\\store.dat", rightItems)) {
-                // Read failure: abort merge, preserve both source files
-                return false;
-            }
-            std::vector<Item> merged;
-            // Pinned items are deliberately NOT deduped — each pinned entry in
-            // each store represents an explicit user choice in an independent
-            // environment, and losing one looks like "a pinned item vanished"
-            // after a merge (reported issue scenario). Unpinned history is
-            // still deduped by kind+hash+data (consistent with Store::Add).
-            auto addPinned = [&](const std::vector<Item>& items) {
-                for (const Item& it : items) {
-                    if (it.pinned) merged.push_back(it);
-                }
-            };
-            auto addUnpinnedUnique = [&](const std::vector<Item>& items) {
-                for (const Item& it : items) {
-                    if (it.pinned) continue;
-                    bool dup = false;
-                    for (const Item& m : merged) {
-                        if (!m.pinned && m.kind == it.kind && m.hash == it.hash && m.data == it.data) {
-                            dup = true;
-                            break;
-                        }
-                    }
-                    if (!dup) {
-                        merged.push_back(it);
-                    }
-                }
-            };
-            std::vector<Item> lp, rp, lu, ru;
-            for (auto& it : leftItems) { if (it.pinned) lp.push_back(std::move(it)); else lu.push_back(std::move(it)); }
-            for (auto& it : rightItems) { if (it.pinned) rp.push_back(std::move(it)); else ru.push_back(std::move(it)); }
-            addPinned(lp);
-            addPinned(rp);
-            addUnpinnedUnique(lu);
-            addUnpinnedUnique(ru);
-            // Reassign all ids monotonically to eliminate potential id
-            // collisions between the two independent stores (each side owns
-            // its own id counter space).
-            uint64_t nextId = 1;
-            for (Item& it : merged) {
-                it.id = nextId++;
-            }
-            // Renumber orders preserving physical block order (left pinned, right pinned,
-            // left unpinned, right unpinned) without re-sorting by old order values.
-            Store::RenumberOrders(merged);
-            // Serialize and write to dst
-            std::vector<uint8_t> buf = Store::SerializeItems(merged);
-            if (!WriteFileAtomic(dstDat, buf.data(), buf.size())) {
-                // Write failed: do NOT delete source, preserve both sides
-                return false;
-            }
-            // Remove src's so it won't be moved over
-            DeleteFileW(srcDat.c_str());
-        } else {
-            // UseLeft = keep user dir, UseRight = keep program dir
-            std::wstring keepDir = (choice == ConflictChoice::UseLeft) ? userDir : progDir;
-            if (keepDir == dst) {
-                // Chosen data is already at destination, delete source's
-                DeleteFileW(srcDat.c_str());
-            } else {
-                // Chosen data is at source, delete destination's (let migration move it)
-                DeleteFileW(dstDat.c_str());
-            }
-        }
+        DeleteFileW(dstDat.c_str());
     }
 
     // Build double-null-terminated source file list

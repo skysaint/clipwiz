@@ -26,7 +26,6 @@ add_executable(clipwiz WIN32
     src/util.cpp
     src/i18n.cpp
     src/asyncwriter.cpp
-    src/conflict.cpp
     src/log.cpp
     src/raii.h
     src/clipwiz.rc

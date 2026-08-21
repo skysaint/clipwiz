@@ -24,6 +24,18 @@ bool AsyncWriter::Start() {
     return true;
 }
 
+// TODO: Concurrent write risk on shutdown.
+// Problem: Stop() waits 5 seconds for the background thread, then closes handles
+// unconditionally. If the thread is still inside WriteFileAtomic when the timeout
+// expires, the thread continues using the now-deleted critical section and closed
+// event handle (use-after-free). Additionally, the caller (App::WM_DESTROY) may
+// then perform its own synchronous WriteFileAtomic to the same path, racing with
+// the still-running background thread over the same .tmp file.
+// Fix: Stop() should signal stop_, then wait indefinitely (or a longer timeout)
+// and only proceed to close handles after the thread has actually exited.
+// If a hard timeout is needed, TerminateThread is a last resort but the CS and
+// event must NOT be deleted while the thread is alive. The synchronous final save
+// in WM_DESTROY should only execute after Stop() confirms thread termination.
 void AsyncWriter::Stop() {
     if (!thread_) {
         return;

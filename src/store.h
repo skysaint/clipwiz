@@ -93,15 +93,6 @@ public:
     // Utility: extract text from item data (Text/Html/Rtf/FileDrop)
     static std::wstring TextOf(const Item& item);
 
-    // Load items from a specific file path (for conflict comparison)
-    static bool LoadItemsFrom(const std::wstring& path, std::vector<Item>& out);
-
-    // Serialize a given item list to binary format (for merge output)
-    static std::vector<uint8_t> SerializeItems(const std::vector<Item>& items);
-
-    // Renumber orders in-place preserving current physical order (for merge use)
-    static void RenumberOrders(std::vector<Item>& items);
-
 private:
     Item* FindMutable(uint64_t id);
     void Evict();
