@@ -1,0 +1,47 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+/////////////////////////////////////////////////////////////////////////////
+// Icon and manifest
+
+IDI_APPICON             ICON            "clipwiz.ico"
+IDI_WINBADGE            ICON            "windows.ico"
+1                       RT_MANIFEST     "app.manifest"
+
+/////////////////////////////////////////////////////////////////////////////
+// Built-in language pack (compiled from lang/zh-CN.lng)
+
+IDR_LNG_ZHCN            RCDATA          "../lang/zh-CN.lng"
+
+/////////////////////////////////////////////////////////////////////////////
+// Version information
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "ClipWiz"
+            VALUE "FileDescription",  "ClipWiz - lightweight clipboard history tool"
+            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "InternalName",     "clipwiz"
+            VALUE "LegalCopyright",   "ClipWiz"
+            VALUE "OriginalFilename", "clipwiz.exe"
+            VALUE "ProductName",      "ClipWiz"
+            VALUE "ProductVersion",   "1.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

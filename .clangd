@@ -1,0 +1,29 @@
+CompileFlags:
+  Add:
+    - --target=x86_64-pc-windows-msvc
+    - -std=c++17
+    - -DUNICODE
+    - -D_UNICODE
+    - -DWIN32_LEAN_AND_MEAN
+    - -DNOMINMAX
+    - -D_WIN32_WINNT=0x0A00
+    - -DWINVER=0x0A00
+    - -Isrc
+  Remove:
+    - -W*
+Diagnostics:
+  UnusedIncludes: None
+  InlayHints:
+    Enabled: No
+  ClangTidy:
+    Remove:
+      - modernize-use-trailing-return-type
+      - cppcoreguidelines-*
+      - readability-else-after-return
+      - readability-identifier-length
+      - readability-magic-numbers
+      - cppcoreguidelines-avoid-magic-numbers
+      - hicpp-signed-bitwise
+      - bugprone-easily-swappable-parameters
+      - performance-no-int-to-ptr
+      - clang-analyzer-unsafeArgv

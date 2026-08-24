@@ -1,0 +1,331 @@
+# ClipWiz
+
+A lightweight Windows clipboard history tool. Single executable, zero dependencies, < 8MB resident memory.
+
+---
+
+## Background
+
+Many everyday workflows involve repeatedly pasting the same fixed text: access passwords for certain websites, authorization codes, template snippets, frequently used paths. The Windows clipboard only holds one item at a time, which makes this tedious.
+
+Existing tools like Ditto handle multi-item clipboards, but they tend to be bulky and suffer from a critical flaw — pinned items get silently cleaned up after a while despite being marked as permanent.
+
+ClipWiz was built around a simple set of requirements:
+
+- Maintain a history of clipboard items for quick reuse
+- Allow critical items to be pinned so they are never automatically removed
+- Bind global hotkeys to pinned items for one-keystroke pasting into any window
+
+On top of that, ClipWiz pursues extreme lightness: pure Win32 API, no runtime dependencies, a single exe of a few hundred KB that runs from anywhere.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+| Item | Requirement |
+| --- | --- |
+| OS | Windows 10 1809+ / Windows 11, x64 |
+| Compiler | Visual Studio 2022 (MSVC + Windows SDK) |
+| Build tool | CMake 3.20+ (included with VS installer) |
+
+### Build
+
+Double-click `build-tool.bat` in the project root and select **2 (Build)**. CMake configuration runs automatically on first build.
+
+Command line:
+
+```cmd
+build-tool.bat build
+```
+
+Or manually:
+
+```cmd
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+### Output
+
+`build\Release\clipwiz.exe` — single file, statically linked CRT, no VC runtime required. Copy it anywhere and run.
+
+### Usage
+
+The program lives in the system tray. Click the tray icon to open the quick-paste popup; right-click for the context menu.
+
+---
+
+## Features
+
+| Feature | Description |
+| --- | --- |
+| Clipboard monitoring | Automatically records every copy operation: text, images, HTML, RTF, file lists |
+| Quick-paste popup | Tray click to open; keyword filtering, number shortcuts, mouse operations |
+| Pin items | Any item can be pinned; pinned items are never auto-deleted and don't count toward history limit |
+| Global hotkeys | Up to 10 pinned positions, each bindable to a global hotkey for instant paste |
+| Multi-format | CF_UNICODETEXT / CF_DIB / HTML Format / RTF / CF_HDROP |
+| Persistence | Custom binary format; data survives restarts |
+| Async disk writes | Background thread handles I/O; UI thread never blocks |
+| Large data protection | Prompts cleanup when data exceeds threshold (configurable) |
+| Internationalization | English built-in; Simplified Chinese compiled into exe; other languages via .lng files |
+| Auto-start | Registry Run key; no admin privileges needed |
+| Dark mode | Follows system theme in real time |
+| High DPI | Per-Monitor V2; crisp rendering across multi-monitor setups |
+
+### Design Boundaries
+
+- Fully offline — no network, no telemetry, no cloud sync
+- No third-party libraries or runtimes (no Qt / .NET / Electron)
+- No plugin system, scripting, or multi-device sync
+- No groups / tags / folders
+- No clipboard content restoration after paste
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│          Hidden main window (message hub)        │
+└──┬──────────────┬──────────────┬────────────────┘
+   │              │              │
+┌──▼──────┐  ┌───▼─────┐  ┌────▼────┐
+│clipboard│  │ hotkey  │  │  tray   │
+└──┬──────┘  └───┬─────┘  └────┬────┘
+   │              │              │
+┌──▼──────────────▼──────────────▼────┐
+│           store (item database)      │
+│     in-memory vector + store.dat     │
+└──┬──────────────────────────────┬───┘
+   │                              │
+┌──▼────────┐            ┌───────▼────────┐
+│   popup   │            │   settings     │
+└──┬────────┘            └────────────────┘
+   │
+┌──▼────────┐     ┌─────────────┐
+│   paste   │     │ asyncwriter │
+└───────────┘     └─────────────┘
+```
+
+- Single process; main logic runs in the UI thread message loop
+- Disk writes handled by a dedicated AsyncWriter thread; UI thread only serializes in memory
+- Image encoding/decoding via WIC (built into Windows)
+- All UI is native Win32 controls + GDI custom drawing
+
+### Source Layout
+
+```
+src/
+  main.cpp           Entry, single-instance check, message loop
+  app.h/.cpp         Global state, message dispatch
+  store.h/.cpp       Item database, serialization, eviction
+  clipboard.h/.cpp   Clipboard monitoring and read/write
+  hotkey.h/.cpp      Global hotkey management
+  paste.h/.cpp       Paste execution
+  popup.h/.cpp       Quick-paste popup window
+  settings.h/.cpp    Configuration and settings dialog
+  imagecodec.h/.cpp  WIC image codec
+  tray.h/.cpp        Tray icon
+  i18n.h/.cpp        Internationalization
+  asyncwriter.h/.cpp Async disk writer
+  log.h/.cpp         Lightweight file logging
+  raii.h             RAII wrappers (GlobalLock, HANDLE, GDI objects)
+  util.h/.cpp        Utility functions
+lang/
+  zh-CN.lng          Simplified Chinese language pack (compiled into exe at build time)
+```
+
+---
+
+## Technical Details
+
+Data formats, storage strategy, paste pipeline, hotkey mechanics, and UI implementation details are documented in [doc/technical.md](doc/technical.md).
+
+---
+
+## Project Structure
+
+```
+clipwiz/
+├── CMakeLists.txt        Build configuration
+├── build-tool.bat        One-click build script
+├── README.md
+├── .gitignore
+├── doc/
+│   ├── technical.md      Detailed technical documentation
+│   └── variables_win.md  Windows environment variables reference (reserved)
+├── lang/
+│   └── zh-CN.lng         Simplified Chinese (compiled into exe)
+└── src/                  All source code
+```
+
+---
+---
+
+# ClipWiz
+
+轻量级 Windows 剪贴板历史记录工具。单文件、零依赖、常驻内存 < 8MB。
+
+---
+
+## 项目背景
+
+日常工作中经常遇到这类场景：某些网站需要输入固定口令才能访问内容，口令本身不变，但每次都要手动复制粘贴；类似地，各种重复性的文本片段（授权码、模板段落、常用路径）也需要反复从某个地方找出来再粘贴。
+
+Windows 自带的剪贴板只保留最近一条内容，无法满足"多条内容快速复用"的需求。市面上有 Ditto 等工具，但体积偏大，且存在置顶条目被自动清理的问题——明明标记了固定，过段时间还是消失了。
+
+ClipWiz 的原始需求很简单：
+
+- 多条剪贴板内容的历史记录与快速粘贴
+- 关键条目可以固定（置顶），永不被自动清理
+- 固定条目可绑定全局快捷键，一键粘贴到任意窗口
+
+在此基础上，ClipWiz 追求极致的轻量：纯 Win32 API 实现，不依赖任何运行时，产物是一个几百 KB 的 exe，拷走即用。
+
+---
+
+## 快速开始
+
+### 环境要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 1809+ / Windows 11，x64 |
+| 编译器 | Visual Studio 2022（含 MSVC 和 Windows SDK） |
+| 构建工具 | CMake 3.20+（VS 安装器勾选即可） |
+
+### 构建
+
+双击项目根目录的 `build-tool.bat`，在交互菜单中选择 **2 (Build)**。首次构建会自动执行 CMake 配置。
+
+命令行：
+
+```cmd
+build-tool.bat build
+```
+
+或手动执行：
+
+```cmd
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+### 产物
+
+`build\Release\clipwiz.exe`——单文件，静态链接 CRT，不需要安装 VC 运行库，复制到任意目录即可运行。
+
+### 运行
+
+双击 exe 后程序驻留系统托盘。单击托盘图标打开快速粘贴框，右键托盘图标打开菜单。
+
+---
+
+## 核心功能
+
+| 功能 | 说明 |
+| --- | --- |
+| 剪贴板监听 | 后台自动记录每次复制内容，支持文本、图片、HTML、RTF、文件列表 |
+| 快速粘贴框 | 单击托盘弹出，支持关键字过滤、序号直选、鼠标操作 |
+| 置顶固定 | 任意条目可置顶，置顶项永不自动删除，不占历史额度 |
+| 全局快捷键 | 置顶区前 10 个位置各可绑定一个全局热键，按下即粘贴 |
+| 多格式支持 | CF_UNICODETEXT / CF_DIB / HTML Format / RTF / CF_HDROP |
+| 持久化 | 自定义二进制格式落盘，重启后数据完整保留 |
+| 异步写盘 | 后台线程执行 I/O，主线程零阻塞 |
+| 大数据保护 | 数据量超阈值时提示清理，阈值可配置 |
+| 国际化 | 英文内置，简体中文编译进 exe，其他语言通过 .lng 文件扩展 |
+| 开机自启 | 写注册表 Run 项，无需管理员权限 |
+| 深色模式 | 跟随系统主题实时切换 |
+| 高 DPI | Per-Monitor V2，多显示器不同缩放清晰渲染 |
+
+### 设计边界
+
+- 纯本地运行，不联网、不遥测、不云同步
+- 不引入第三方库和运行时（无 Qt / .NET / Electron）
+- 不做插件系统、脚本扩展、多设备同步
+- 不做分组 / 标签 / 文件夹
+- 不做粘贴后剪贴板内容还原
+
+---
+
+## 技术架构
+
+```
+┌─────────────────────────────────────────────────┐
+│            隐藏主窗口（消息中枢）                 │
+└──┬──────────────┬──────────────┬────────────────┘
+   │              │              │
+┌──▼──────┐  ┌───▼─────┐  ┌────▼────┐
+│clipboard│  │ hotkey  │  │  tray   │
+│剪贴板监听│  │热键管理  │  │托盘图标 │
+└──┬──────┘  └───┬─────┘  └────┬────┘
+   │              │              │
+┌──▼──────────────▼──────────────▼────┐
+│           store（条目库）             │
+│     内存 vector + store.dat 持久化   │
+└──┬──────────────────────────────┬───┘
+   │                              │
+┌──▼────────┐            ┌───────▼────────┐
+│   popup   │            │   settings     │
+│ 快速粘贴框 │            │   设置对话框    │
+└──┬────────┘            └────────────────┘
+   │
+┌──▼────────┐     ┌─────────────┐
+│   paste   │     │ asyncwriter │
+│ 粘贴执行   │     │ 后台写盘线程 │
+└───────────┘     └─────────────┘
+```
+
+- 单进程，主逻辑在 UI 线程消息循环中执行
+- 写盘由 AsyncWriter 独立线程完成，主线程仅做内存序列化
+- 图片编解码使用 WIC（Windows 内置组件）
+- 全部界面为 Win32 原生控件 + GDI 自绘
+
+### 源文件
+
+```
+src/
+  main.cpp           入口、单实例、消息循环
+  app.h/.cpp         全局状态、消息分发
+  store.h/.cpp       条目库、序列化、淘汰
+  clipboard.h/.cpp   剪贴板监听与读写
+  hotkey.h/.cpp      全局热键管理
+  paste.h/.cpp       粘贴执行
+  popup.h/.cpp       快速粘贴框
+  settings.h/.cpp    配置与设置对话框
+  imagecodec.h/.cpp  WIC 图片编解码
+  tray.h/.cpp        托盘图标
+  i18n.h/.cpp        国际化
+  asyncwriter.h/.cpp 异步写盘
+  log.h/.cpp         轻量文件日志
+  raii.h             RAII 封装（GlobalLock、HANDLE、GDI 对象）
+  util.h/.cpp        工具函数
+lang/
+  zh-CN.lng          简体中文语言包（编译时打包进 exe）
+```
+
+---
+
+## 技术细节
+
+数据格式、存储策略、粘贴链路、快捷键机制、界面实现等详细技术说明见 [doc/technical.md](doc/technical.md)。
+
+---
+
+## 目录结构
+
+```
+clipwiz/
+├── CMakeLists.txt        构建配置
+├── build-tool.bat        一键构建脚本
+├── README.md
+├── .gitignore
+├── doc/
+│   ├── technical.md      详细技术文档
+│   └── variables_win.md  Windows 环境变量参考（预留）
+├── lang/
+│   └── zh-CN.lng         简体中文（编译时打包进 exe）
+└── src/                  全部源码
+```

@@ -1,0 +1,97 @@
+# ClipWiz 简体中文语言包
+# 格式：key=value（UTF-8 编码）
+
+# 托盘菜单
+tray.show_popup=打开快速粘贴框
+tray.settings=设置
+tray.autostart=开机自启
+tray.clear_history=清空历史（保留置顶）
+tray.about=关于
+tray.exit=退出
+
+# 快速粘贴框
+popup.title=ClipWiz
+popup.filter_hint=输入关键字过滤...
+popup.hint=Enter 粘贴 · Alt+数字 直接粘贴 · Ctrl+P 置顶 · Ctrl+D 删除 · Esc 关闭
+popup.empty=暂无剪贴板记录
+popup.empty_filtered=没有匹配的条目
+popup.menu.copy=复制
+popup.menu.paste=粘贴
+popup.menu.pin=置顶（永不清理）
+popup.menu.unpin=取消置顶
+popup.menu.delete=删除
+
+# 设置对话框
+settings.title=ClipWiz 设置
+settings.tab.general=常规
+settings.tab.types=支持类型
+settings.tab.shortcuts=快捷键
+settings.autostart=开机自动启动
+settings.autostart_yes=是
+settings.max_history=保存条数上限：
+settings.expiry_days=最多保存天数：
+settings.clean_on_exit=退出即清理
+settings.language=语言：
+settings.lang_auto=跟随系统
+settings.theme=主题：
+settings.theme_auto=跟随系统
+settings.theme_light=浅色
+settings.theme_dark=深色
+settings.popup_pos=窗口弹出位置：
+settings.pos_mouse=鼠标指针处
+settings.pos_caret=光标处
+settings.pos_last=上次打开的位置
+settings.font=显示字体：
+settings.font_default=恢复默认
+settings.font_default_val=（系统默认）
+settings.data_dir=数据存储：
+settings.data_installed=用户目录（推荐）
+settings.data_portable=程序所在目录（便携）
+settings.open_dir=打开目录
+migrate.overwrite_confirm=目标目录已有历史数据，继续将覆盖该数据。确定吗？
+settings.popup_hotkey=唤出快速粘贴框：
+settings.pinned_group=置顶项快捷键
+settings.position=位置
+settings.win_key=含Win
+settings.ok=确定
+settings.cancel=取消
+
+# 支持类型描述
+type.text.name=纯文本 (CF_UNICODETEXT)
+type.text.desc=纯 Unicode 文本。几乎所有程序复制文字时都会产生此格式。
+type.image.name=图片 (CF_DIB / PNG)
+type.image.desc=位图图像。截图工具、图片编辑器、浏览器等复制图片时产生。
+type.html.name=HTML 格式
+type.html.desc=富网页内容。浏览器和邮件客户端复制带格式文字时产生。
+type.rtf.name=富文本格式 (RTF)
+type.rtf.desc=带格式的文档内容。Word、写字板等办公软件复制时产生。
+type.filedrop.name=文件拖放 (CF_HDROP)
+type.filedrop.desc=文件/文件夹路径列表。在资源管理器中复制文件时产生。只存路径，不存文件本身。
+
+# 消息
+msg.select_pinned=先在列表里选中一条置顶内容。
+msg.confirm_delete_pinned=这条是置顶的，确定要永久删除吗？
+msg.confirm_clear=确定清空所有非置顶的历史记录吗？
+msg.hotkey_conflict=以下快捷键注册失败（可能被其他程序占用）：
+msg.hotkey_suggest=提示：建议使用 Ctrl+Alt+数字 的组合，冲突最少。
+msg.save_failed=数据文件保存失败，请检查磁盘空间和权限。
+msg.corrupt_found=数据文件已损坏，已自动备份。当前以空库启动。
+msg.need_modifier=至少要带一个 Ctrl / Alt / Win 修饰键。
+msg.same_as_popup=这个组合已经是唤出快捷键了，请换一个。
+msg.risky_ctrl_num=%s 与浏览器/编辑器的切换标签页快捷键冲突，建议改用 Ctrl+Alt+数字。
+msg.risky_ctrl_edit=这是系统通用的编辑快捷键，占用后会影响所有程序，建议换一个。
+msg.risky_alt_tab=Alt+Tab 是系统切换窗口用的，注册不上。
+msg.large_data=剪贴板数据已经很大了，是否清理掉非置顶的大条目？
+msg.font_selection_title=选择字体
+msg.font_vertical_unsupported=不支持竖排（@开头）字体，请换一个。
+
+# 预览
+preview.image=[图片 %u×%u]
+preview.files=%d 个文件: %s
+preview.empty=[空白内容]
+
+# 关于
+about.text=ClipWiz %s\n轻量剪贴板历史记录工具。\n数据全部存在本地，不联网。
+
+# 快捷键
+hotkey.clear=解除
