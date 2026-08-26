@@ -725,7 +725,7 @@ void App::ShowAbout() {
                     };
 
                     // About text
-                    std::wstring aboutStr = util::Format(i18n::T("about.text"), L"1.1.0");
+                    std::wstring aboutStr = util::Format(i18n::T("about.text"), L"1.2.0");
                     MkCtrl(L"STATIC", aboutStr.c_str(), SS_LEFT, 12, 10, 420, 50, -1);
 
                     // Separator
