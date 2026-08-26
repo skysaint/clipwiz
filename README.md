@@ -84,6 +84,26 @@ The program lives in the system tray. Click the tray icon to open the quick-past
 
 ---
 
+## Version History
+
+### v1.2.0
+
+- **Type icons on every row.** Each entry now shows a fixed-width type marker (plain text / RTF / HTML / image / file list), each with its own shape and color so you can tell types apart at a glance. The pin, type icon, and number columns are evenly spaced and aligned across all rows.
+- **"Convert to plain text" menu.** Right-click an RTF or HTML entry to strip its formatting in place — the same entry becomes plain text and keeps its position. If that makes it identical to an existing text entry, the two are merged (the higher one is kept; two pinned duplicates are both kept).
+- **Fixed duplicate rich text.** Copying the same passage from Word or a browser repeatedly no longer piles up duplicate entries. Duplicate detection now compares the actual text content, and a repeat copy keeps the newest version so re-edited formatting isn't lost.
+- **Fixed ordering.** Newly copied and newly pasted items now reliably appear at the top of their group.
+- **Settings tooltips.** The Windows-key icon buttons in Settings now show a hint on hover.
+
+### v1.1.0
+
+- Settings dialog polish and layout improvements; item expiry based on last-use time; multilingual display and stability fixes.
+
+### v1.0.0
+
+- First release: clipboard history with pinning and auto-cleanup, quick-paste popup, global hotkeys, support for images / RTF / HTML / file lists, settings dialog, internationalization, dark mode, and high-DPI rendering.
+
+---
+
 ## Architecture
 
 ```
@@ -247,6 +267,26 @@ cmake --build build --config Release
 - 不做插件系统、脚本扩展、多设备同步
 - 不做分组 / 标签 / 文件夹
 - 不做粘贴后剪贴板内容还原
+
+---
+
+## 版本历史
+
+### v1.2.0
+
+- **每行类型图标。** 每个条目前显示一个等宽的类型标识（纯文本 / RTF / HTML / 图片 / 文件列表），每种类型造型和颜色各不相同，一眼即可区分类型。图钉、类型图标、序号三列等间距，所有行左对齐。
+- **"转为纯文本"菜单。** 右键 RTF 或 HTML 条目可将其原地转为纯文本——同一条变成纯文本、位置不变。若转换后与已有纯文本条目相同，则自动合并（保留靠上的那条；两条都置顶时都保留）。
+- **修复富文本重复。** 从 Word 或浏览器反复复制同一段内容，不再堆积重复条目。去重改为比较实际文本内容，重复复制时保留最新版本，重新排版后不会丢。
+- **修复排序。** 新复制和新粘贴的条目现在都会稳定地出现在所属分组的最上方。
+- **设置项悬浮提示。** 设置界面里的 Win 键图标按钮，鼠标悬停会显示提示。
+
+### v1.1.0
+
+- 设置对话框细节与布局优化；按最后使用时间过期；多语言显示与稳定性修复。
+
+### v1.0.0
+
+- 首个版本：剪贴板历史（置顶与自动清理）、快速粘贴框、全局快捷键，支持图片 / RTF / HTML / 文件列表、设置对话框、国际化、深色模式、高 DPI。
 
 ---
 

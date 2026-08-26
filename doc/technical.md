@@ -403,26 +403,6 @@ lang/
 | Input method state | Only sends Ctrl+V combo, never character-by-character input |
 
 ---
-
-## Version History
-
-### v1.2.0
-
-- **Per-row type icons.** Every entry now shows a fixed-width type indicator (TXT / RTF / HTML / image / file list), each with a distinct shape and a fixed per-type color (with separate light/dark palettes) — a double cue that reads even at small sizes. The pin / type-icon / index columns are equally spaced and left-aligned across all rows.
-- **"Convert to plain text" context menu.** Right-clicking an RTF or HTML entry offers an in-place conversion to plain text (same entry, same position — not a new copy). If the result duplicates an existing text entry, the two are merged: the entry earlier in display order is kept (which keeps a pinned duplicate across groups); when both are pinned, neither is removed. The surviving entry becomes selected.
-- **Canonical deduplication.** Dedup now hashes the *extracted plain-text body* plus a per-kind prefix, instead of raw clipboard bytes. This fixes duplicate rich-text entries piling up when the same passage is copied repeatedly from Word/browsers (whose RTF/HTML bytes differ every time). On a dedup hit the newest content is kept, so re-editing formatting before recopying pastes the latest version.
-- **Newest-on-top ordering fix.** The "selective front" behavior (pinned stay put; unpinned move to the top of the unpinned group) is consolidated into a single shared function, so newly copied and newly used items reliably land at the top of their group.
-- **Settings tooltips.** Each Windows-key icon button in the settings dialog now shows a hover tooltip.
-
-### v1.1.0
-
-- Settings dialog polish and layout improvements; expiry based on last-use time; multilingual display and stability fixes.
-
-### v1.0.0
-
-- Initial release: clipboard history with pin/eviction, quick-paste popup, global hotkeys, image/RTF/HTML/file support, settings dialog, i18n, dark mode, high-DPI.
-
----
 ---
 
 # ClipWiz 技术文档
@@ -837,23 +817,3 @@ lang/
 | --- | --- |
 | i18n 查找优化 | T() 英文回退目前线性扫描 kDefaults（~60 条），可改为 unordered_map 统一查找 |
 | 托盘 tooltip 增强 | 显示条目数和置顶数，如 "ClipWiz — 42 条记录，3 个置顶"，无需打开窗口即可了解状态 |
-
----
-
-## 版本历史
-
-### v1.2.0
-
-- **每行类型图标。** 每个条目前显示一个等宽的类型标识（纯文本 / RTF / HTML / 图片 / 文件列表），每种类型造型不同、颜色固定（深浅主题各一套），形状 + 颜色双保险，小尺寸下也能一眼区分。图钉 / 类型图标 / 序号三列等间距、全部左对齐。
-- **右键"转为纯文本"。** 右键 RTF 或 HTML 条目可将其**原地**转为纯文本（同一条、位置不变，不是另存一份）。若转换后与已有纯文本条目重复，则合并：保留显示顺序更靠前的那条（因此跨组时优先保留置顶项）；两条都置顶时都不删除。合并后光标定位到保留的那一条。
-- **规范化去重。** 去重改用"提取出的纯文本正文 + 类型前缀"计算哈希，而非剪贴板原始字节。修复了从 Word/浏览器反复复制同一段内容时堆积重复富文本条目的问题（它们每次的 RTF/HTML 字节都不同）。命中重复时保留最新内容，用户调整排版后再复制，粘贴到的是最新版本。
-- **最新置顶排序修复。** 将"选择性前置"行为（置顶项不动；非置顶项提到非置顶组最上方）收敛为单一共用函数，新复制和新使用的条目都能稳定地落到所属组的最上方。
-- **设置项悬浮提示。** 设置对话框里每个 Win 键图标按钮加了 hover 提示。
-
-### v1.1.0
-
-- 设置对话框细节与布局优化；按最后使用时间过期；多语言显示与稳定性修复。
-
-### v1.0.0
-
-- 首个版本：剪贴板历史（置顶/淘汰）、快速粘贴框、全局热键、图片/RTF/HTML/文件支持、设置对话框、国际化、深色模式、高 DPI。
