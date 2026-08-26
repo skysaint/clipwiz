@@ -463,6 +463,57 @@ std::wstring Store::TextOf(const Item& item) {
     }
 }
 
+// Canonical dedup hash.
+//
+// Two entries are considered "the same content" when their *meaningful*
+// content matches, not their raw clipboard bytes. Rich text (RTF/HTML) from
+// editors like Word embeds volatile bytes (revision ids, timestamps, font
+// tables, GUIDs) that differ on every copy of the exact same passage, so
+// hashing raw bytes wrongly treats them as distinct. Instead we hash the
+// extracted plain-text body.
+//
+// A per-kind prefix keeps different kinds distinct: a plain-text "hello" and
+// an RTF "hello" must remain two separate entries (one carries formatting).
+// Images have no text body, so they hash their raw (PNG) bytes.
+static uint64_t CanonicalHash(ItemKind kind, const std::vector<uint8_t>& data) {
+    const char* prefix;
+    std::vector<uint8_t> body;
+    switch (kind) {
+        case ItemKind::Text:      prefix = "TXT:"; break;
+        case ItemKind::FileDrop:  prefix = "FILE:"; break;
+        case ItemKind::Html:      prefix = "HTML:"; break;
+        case ItemKind::Rtf:       prefix = "RTF:"; break;
+        case ItemKind::Image:     prefix = "IMG:"; break;
+        default:                  prefix = "?:"; break;
+    }
+    std::wstring text;
+    switch (kind) {
+        case ItemKind::Text:
+        case ItemKind::FileDrop:
+            text.assign(reinterpret_cast<const wchar_t*>(data.data()),
+                        data.size() / sizeof(wchar_t));
+            break;
+        case ItemKind::Html: text = HtmlToPlainText(data); break;
+        case ItemKind::Rtf:  text = RtfToPlainText(data);  break;
+        case ItemKind::Image:
+        default:
+            break;
+    }
+    if (kind == ItemKind::Image) {
+        body = data;  // No text body: dedup images by raw bytes.
+    } else {
+        body.assign(reinterpret_cast<const uint8_t*>(text.data()),
+                    reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
+    }
+    // Prepend the type prefix bytes, then the body, and hash the whole.
+    std::vector<uint8_t> buf;
+    const size_t plen = std::strlen(prefix);
+    buf.reserve(plen + body.size());
+    buf.insert(buf.end(), prefix, prefix + plen);
+    buf.insert(buf.end(), body.begin(), body.end());
+    return util::Hash64(buf.data(), buf.size());
+}
+
 std::wstring MakeItemPreview(const Item& item) {
     switch (item.kind) {
         case ItemKind::Image:
@@ -635,19 +686,28 @@ void Store::ExpireCheck() {
 
 uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uint32_t imgH) {
     if (data.empty()) return 0;
-    const uint64_t hash = util::Hash64(data.data(), data.size());
+    // Dedup by canonical content (plain-text body + type prefix), NOT raw bytes:
+    // Word/browsers emit different RTF/HTML bytes for the exact same passage.
+    const uint64_t hash = CanonicalHash(kind, data);
     const uint64_t now = util::NowFileTime();
 
-    // Dedup: same kind and same content
+    // Dedup: same kind + same canonical content. On a hit we KEEP THE NEW
+    // content (the user may have re-edited formatting/images before recopying,
+    // and expects to paste the latest version), then apply 选择性前置操作.
     for (Item& item : items_) {
-        if (item.kind == kind && item.hash == hash && item.data == data) {
+        if (item.kind == kind && item.hash == hash) {
             const uint64_t dupId = item.id;
+            // Refresh the stored bytes to the newest copy (same canonical hash).
+            item.data = std::move(data);
+            item.imgW = imgW;
+            item.imgH = imgH;
+            item.preview = MakeItemPreview(item);
             if (item.pinned) {
-                // Pinned duplicate: don't move, don't refresh usedAt
+                // Pinned: content updated, but position/pin/usedAt unchanged.
                 return dupId;
             }
             item.usedAt = now;
-            MoveToHead(items_, dupId, /*pinned=*/false);
+            PromoteToFront(dupId);  // 选择性前置操作 for existing unpinned dup
             return dupId;
         }
     }
@@ -674,7 +734,7 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     item.preview = MakeItemPreview(item);
     const uint64_t id = item.id;
     items_.push_back(std::move(item));
-    MoveToHead(items_, id, /*pinned=*/false);  // Newest at top of unpinned section
+    PromoteToFront(id);  // 选择性前置操作: newest at top of unpinned section
     return id;
 }
 
@@ -706,14 +766,103 @@ void Store::ClearNonPinned() {
     if (!items_.empty()) Normalize(items_);
 }
 
+uint64_t Store::ConvertToPlainText(uint64_t id) {
+    size_t idx = items_.size();
+    for (size_t i = 0; i < items_.size(); ++i) {
+        if (items_[i].id == id) { idx = i; break; }
+    }
+    if (idx == items_.size()) {
+        LOG_INFO("ConvertToPlainText: id=%llu not found", (unsigned long long)id);
+        return 0;
+    }
+    if (items_[idx].kind != ItemKind::Rtf && items_[idx].kind != ItemKind::Html) {
+        LOG_INFO("ConvertToPlainText: id=%llu kind=%u not rich text, skip",
+                 (unsigned long long)id, (unsigned)items_[idx].kind);
+        return 0;
+    }
+
+    std::wstring text = TextOf(items_[idx]);  // RtfToPlainText / HtmlToPlainText
+    std::vector<uint8_t> bytes(
+        reinterpret_cast<const uint8_t*>(text.data()),
+        reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
+    // Canonical hash of the resulting Text entry (same scheme as Add uses),
+    // so it dedups correctly against existing plain-text entries.
+    const uint64_t newHash = CanonicalHash(ItemKind::Text, bytes);
+
+    LOG_INFO("ConvertToPlainText: id=%llu oldKind=%u idx=%zu -> Text, textLen=%zu newHash=%llu",
+             (unsigned long long)id, (unsigned)items_[idx].kind, idx, text.size(),
+             (unsigned long long)newHash);
+
+    // In-place: keep id, pinned, order, position, createdAt/usedAt untouched.
+    // This is a content edit, not a "use", so we never reorder.
+    items_[idx].kind = ItemKind::Text;
+    items_[idx].data = std::move(bytes);
+    items_[idx].hash = newHash;
+    items_[idx].preview = MakeItemPreview(items_[idx]);
+
+    // Dedup fallout: converting may make this entry identical to an existing
+    // plain-text entry. Merge to restore the "no duplicates" invariant.
+    //   - Keep whichever sits EARLIER in display order (smaller index). Since
+    //     the pinned group renders before the unpinned group, this naturally
+    //     keeps a pinned duplicate over an unpinned one, and works cross-group.
+    //   - Do NOT promote/front (a conversion is not a use).
+    //   - If BOTH are pinned, don't delete either (pinned = user-only removal).
+    size_t dupIdx = items_.size();
+    for (size_t i = 0; i < items_.size(); ++i) {
+        if (i == idx) continue;
+        const Item& other = items_[i];
+        if (other.kind == ItemKind::Text && other.hash == newHash &&
+            other.data == items_[idx].data) {  // data == as collision safety belt
+            dupIdx = i;
+            break;
+        }
+    }
+
+    if (dupIdx == items_.size()) {
+        // No duplicate: the entry stays put, select itself.
+        LOG_INFO("ConvertToPlainText: no duplicate, survivor id=%llu",
+                 (unsigned long long)id);
+        return id;
+    }
+    LOG_INFO("ConvertToPlainText: duplicate at idx=%zu id=%llu (pinnedSelf=%d pinnedDup=%d)",
+             dupIdx, (unsigned long long)items_[dupIdx].id,
+             (int)items_[idx].pinned, (int)items_[dupIdx].pinned);
+
+    if (items_[idx].pinned && items_[dupIdx].pinned) {
+        // Both pinned: tolerate the duplicate, don't auto-remove a pinned item.
+        LOG_INFO("ConvertToPlainText: both pinned, kept both; survivor id=%llu",
+                 (unsigned long long)id);
+        return id;
+    }
+
+    // Keep the earlier one (smaller index), drop the later one.
+    size_t keepIdx = std::min(idx, dupIdx);
+    size_t victimIdx = std::max(idx, dupIdx);
+    const uint64_t survivorId = items_[keepIdx].id;
+    const uint64_t victimId = items_[victimIdx].id;
+    items_.erase(items_.begin() + static_cast<ptrdiff_t>(victimIdx));
+    if (!items_.empty()) Normalize(items_);
+    LOG_INFO("ConvertToPlainText: merged, kept id=%llu (idx=%zu), removed id=%llu (idx=%zu)",
+             (unsigned long long)survivorId, keepIdx, (unsigned long long)victimId, victimIdx);
+    return survivorId;
+}
+
+void Store::PromoteToFront(uint64_t id) {
+    Item* item = FindMutable(id);
+    if (!item) return;
+    if (item->pinned) {
+        // Pinned: nailed down, position unchanged.
+        return;
+    }
+    // Unpinned: move to the head of the unpinned group; others shift down.
+    MoveToHead(items_, id, /*pinned=*/false);
+}
+
 bool Store::Touch(uint64_t id) {
     Item* item = FindMutable(id);
     if (!item) return false;
     item->usedAt = util::NowFileTime();
-    if (!item->pinned) {
-        MoveToHead(items_, id, /*pinned=*/false);  // Unpinned: promote to top
-    }
-    // Pinned: position unchanged (pinned = "nailed down")
+    PromoteToFront(id);  // 选择性前置操作 (pinned stays put, unpinned to top)
     return true;
 }
 
@@ -841,7 +990,7 @@ Store::LoadResult Store::Load() {
         item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
         pos += dataLen;
 
-        item.hash = util::Hash64(item.data.data(), item.data.size());
+        item.hash = CanonicalHash(item.kind, item.data);
         item.preview = MakeItemPreview(item);
         if (item.id >= nextId_) {
             nextId_ = item.id + 1;

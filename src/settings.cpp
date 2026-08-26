@@ -34,6 +34,38 @@ HFONT g_fontBold = nullptr;
 HWND g_settingsDlg = nullptr;
 int g_dpi = 96;
 HICON g_winKeyIcon = nullptr;
+HWND g_tooltip = nullptr;
+
+// Lazily create the shared tooltip control (owned by the dialog) and return it.
+HWND EnsureTooltip(HWND owner) {
+    if (!g_tooltip) {
+        g_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                    WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (g_tooltip) {
+            SetWindowPos(g_tooltip, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SendMessageW(g_tooltip, TTM_SETMAXTIPWIDTH, 0, 300);
+        }
+    }
+    return g_tooltip;
+}
+
+// Attach a hover tooltip to a control. TTF_SUBCLASS lets the tooltip handle
+// mouse messages itself, so we don't need to forward from the dialog proc.
+void AddTooltip(HWND owner, HWND ctrl, const wchar_t* text) {
+    HWND tip = EnsureTooltip(owner);
+    if (!tip || !ctrl) return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = owner;
+    ti.uId = reinterpret_cast<UINT_PTR>(ctrl);
+    ti.lpszText = const_cast<wchar_t*>(text);
+    SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+}
 
 int Dip(int value) {
     return MulDiv(value, g_dpi, 96);
@@ -73,6 +105,9 @@ HWND MakeWinKeyCheckbox(HWND parent, int x, int y, int w, int h, int id, bool ch
     }
     if (checked) {
         CheckDlgButton(parent, id, BST_CHECKED);
+    }
+    if (hwnd) {
+        AddTooltip(parent, hwnd, i18n::T("settings.win_key_tip"));
     }
     return hwnd;
 }
@@ -379,6 +414,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             return TRUE;
         case WM_DESTROY:
             g_settingsDlg = nullptr;
+            if (g_tooltip) { DestroyWindow(g_tooltip); g_tooltip = nullptr; }
             if (g_font) { DeleteObject(g_font); g_font = nullptr; }
             if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = nullptr; }
             return TRUE;

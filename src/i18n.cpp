@@ -44,6 +44,7 @@ const Entry kDefaults[] = {
     {"popup.menu.pin", L"Pin (never auto-clean)"},
     {"popup.menu.unpin", L"Unpin"},
     {"popup.menu.delete", L"Delete"},
+    {"popup.menu.to_plain", L"Convert to plain text"},
 
     // Settings dialog
     {"settings.title", L"ClipWiz Settings"},
@@ -77,6 +78,7 @@ const Entry kDefaults[] = {
     {"settings.pinned_group", L"Pinned item shortcuts"},
     {"settings.position", L"Pos"},
     {"settings.win_key", L"Win"},
+    {"settings.win_key_tip", L"Include the Windows key in this shortcut"},
     {"settings.ok", L"OK"},
     {"settings.cancel", L"Cancel"},
 

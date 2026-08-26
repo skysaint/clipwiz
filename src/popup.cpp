@@ -53,6 +53,9 @@ struct State {
     int thumbW = 0;
     int hotkeyW = 0;
     int pinW = 0;  // Pin icon reserved width
+    int typeW = 0;    // Per-row type icon slot (square)
+    int iconGap = 0;  // Uniform gap between pin / type / index / text
+    int leadW = 0;    // Total leading strip width (gap+pin+gap+type+gap+index+gap)
     int fontMainH = 0;
     int fontSmallH = 0;
     int sortBtnsW = 0;  // Width for 4 pinned-item sort icons at row end
@@ -183,6 +186,13 @@ void CalcMetrics() {
                          MeasureTextWidth(g.fontSmall, L"Ctrl+Shift+Alt+PgDn") +
                              util::Scale(12, g.dpi));
     g.pinW = std::max(util::Scale(14, g.dpi), util::Scale(12, g.dpi));
+    // Uniform spacing unit between the leading elements (pin / type / index)
+    // and before the text. Keeps pin, type icon and index equally spaced and
+    // everything left-aligned across every row.
+    g.iconGap = std::max(util::Scale(5, g.dpi), g.pad / 2);
+    // Square slot for the per-row type icon (TXT/RTF/HTML/IMG/FILE), sized to
+    // the small font height so it lines up with the index digits.
+    g.typeW = std::max(util::Scale(14, g.dpi), g.fontSmallH);
     // 4 sort icons (MoveToTop / MoveUp / MoveDown / MoveToBottom) on pinned rows only.
     // Keep icons compact so they don't eat too much row text space.
     int btnSize = util::Scale(12, g.dpi);
@@ -205,8 +215,11 @@ void CalcMetrics() {
     // (per-row hotkeys are shown only in the bottom global hint bar).
     // Adding either on top would force the whole popup wider and leave
     // ugly empty trailing space on the right for unpinned rows.
+    // Leading strip before the text: gap, pin, gap, type, gap, index, gap.
+    // Same formula used by DrawRow so width and drawing never drift.
+    g.leadW = g.iconGap + g.pinW + g.iconGap + g.typeW + g.iconGap + g.indexW + g.iconGap;
     g.width = std::max(util::Scale(520, g.dpi),
-                       g.pad * 2 + g.pinW + g.indexW + g.thumbW + minTextW) + g.scrollW;
+                       g.pad + g.leadW + g.thumbW + minTextW) + g.scrollW;
 }
 
 int ListTop() { return g.titleH + g.pad + g.editH + g.pad / 2; }
@@ -394,6 +407,139 @@ void DrawPinIcon(HDC dc, int x, int cy, int size, COLORREF color) {
     DeleteObject(brush);
 }
 
+// Draw a small, equal-width type indicator for every row inside `slot`.
+// Pure GDI vector art so it stays crisp at any DPI and recolors with theme.
+// Fixed per-type accent color (colour + shape = double cue). Two palettes so
+// contrast holds on both light and dark backgrounds. Selected rows override
+// this with the selection foreground (handled by the caller).
+COLORREF TypeIconColor(ItemKind kind, bool dark) {
+    switch (kind) {
+        case ItemKind::Text:                       // blue
+            return dark ? RGB(0x6f, 0xb1, 0xff) : RGB(0x1f, 0x6f, 0xd0);
+        case ItemKind::Rtf:                        // purple
+            return dark ? RGB(0xc0, 0x8c, 0xff) : RGB(0x7d, 0x3c, 0xc4);
+        case ItemKind::Html:                       // orange
+            return dark ? RGB(0xff, 0xa5, 0x4d) : RGB(0xd9, 0x6a, 0x0f);
+        case ItemKind::Image:                      // green
+            return dark ? RGB(0x5f, 0xc9, 0x84) : RGB(0x1f, 0x9d, 0x55);
+        case ItemKind::FileDrop:                   // teal / slate
+        default:
+            return dark ? RGB(0x5f, 0xbf, 0xc9) : RGB(0x2a, 0x8a, 0x99);
+    }
+}
+
+// Per-row type indicator. Shapes are deliberately distinct so they read even
+// at tiny sizes; colour reinforces the distinction (double cue).
+// TXT  = three text lines
+// RTF  = a capital "A" with a style underline (font / formatting)
+// HTML = angle brackets < >
+// IMG  = picture frame with a mountain/sun
+// FILE = a document page with a folded corner
+void DrawTypeIcon(HDC dc, const RECT& slot, ItemKind kind, COLORREF color) {
+    // Inner drawing box: square, centered in the slot with a small inset.
+    int side = std::min(slot.right - slot.left, slot.bottom - slot.top);
+    int inset = std::max(1, side / 6);
+    int box = side - inset * 2;
+    if (box < 4) box = 4;
+    int left = slot.left + (slot.right - slot.left - box) / 2;
+    int top  = slot.top + (slot.bottom - slot.top - box) / 2;
+    int right = left + box;
+    int bottom = top + box;
+    int pw = std::max(1, box / 10);
+
+    HPEN pen = CreatePen(PS_SOLID, pw, color);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+    switch (kind) {
+        case ItemKind::Text: {
+            // Three horizontal text lines (last one shorter).
+            int lines = 3;
+            int gap = box / (lines + 1);
+            for (int i = 1; i <= lines; ++i) {
+                int y = top + gap * i;
+                int x2 = (i == lines) ? left + box * 2 / 3 : right;
+                MoveToEx(dc, left, y, nullptr);
+                LineTo(dc, x2, y);
+            }
+            break;
+        }
+        case ItemKind::Rtf: {
+            // A capital "A" with a style underline — the universal "font /
+            // formatting" glyph, so it reads as rich/formatted text. Drawn as
+            // strokes (not a font) to stay crisp at tiny sizes.
+            int cx = (left + right) / 2;
+            int apexY = top;                 // top of the A
+            int baseY = bottom - box / 4;    // where the legs end (above underline)
+            int legHalf = box * 2 / 5;       // half-spread of the legs at the base
+            // Left and right diagonal strokes.
+            MoveToEx(dc, cx - legHalf, baseY, nullptr);
+            LineTo(dc, cx, apexY);
+            LineTo(dc, cx + legHalf, baseY);
+            // Crossbar.
+            int barY = top + box / 2;
+            int barHalf = legHalf / 2;
+            MoveToEx(dc, cx - barHalf, barY, nullptr);
+            LineTo(dc, cx + barHalf, barY);
+            // Style underline (bold-ish) under the whole letter.
+            HBRUSH ul = CreateSolidBrush(color);
+            RECT ulRc = {left, bottom - std::max(1, box / 8), right, bottom};
+            FillRect(dc, &ulRc, ul);
+            DeleteObject(ul);
+            break;
+        }
+        case ItemKind::Html: {
+            // Angle brackets  < >
+            int midY = (top + bottom) / 2;
+            int q = box / 4;
+            // left bracket
+            MoveToEx(dc, left + q, top + q, nullptr);
+            LineTo(dc, left, midY);
+            LineTo(dc, left + q, bottom - q);
+            // right bracket
+            MoveToEx(dc, right - q, top + q, nullptr);
+            LineTo(dc, right, midY);
+            LineTo(dc, right - q, bottom - q);
+            break;
+        }
+        case ItemKind::Image: {
+            // Picture frame + mountain + sun
+            Rectangle(dc, left, top, right, bottom);
+            int baseY = bottom - box / 5;
+            // sun
+            int sunR = std::max(1, box / 8);
+            int sunCx = left + box / 3;
+            int sunCy = top + box / 3;
+            Ellipse(dc, sunCx - sunR, sunCy - sunR, sunCx + sunR, sunCy + sunR);
+            // mountain
+            MoveToEx(dc, left + pw, baseY, nullptr);
+            LineTo(dc, left + box / 2, top + box / 2);
+            LineTo(dc, right - pw, baseY);
+            break;
+        }
+        case ItemKind::FileDrop:
+        default: {
+            // Document page with a folded top-right corner
+            int fold = box / 3;
+            MoveToEx(dc, left, top, nullptr);
+            LineTo(dc, right - fold, top);
+            LineTo(dc, right, top + fold);
+            LineTo(dc, right, bottom);
+            LineTo(dc, left, bottom);
+            LineTo(dc, left, top);
+            // fold line
+            MoveToEx(dc, right - fold, top, nullptr);
+            LineTo(dc, right - fold, top + fold);
+            LineTo(dc, right, top + fold);
+            break;
+        }
+    }
+
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+}
+
 void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     const Row& row = g.rows[static_cast<size_t>(index)];
     const Item* item = g.host->GetStore().Find(row.id);
@@ -421,11 +567,29 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     DeleteObject(back);
     SetBkMode(dc, TRANSPARENT);
 
-    // Pin area (uniform width for all rows)
+    // ---- Leading strip: equal-spaced pin slot, type-icon slot, index slot ----
+    // Layout (left to right, all left-aligned across every row):
+    //   [gap][pin][gap][type][gap][index][gap] text...
+    // Pin slot is a placeholder for unpinned rows so type/index/text stay aligned.
+    int G = g.iconGap;
+    int pinLeft   = rc.left + G;
+    int typeLeft  = pinLeft + g.pinW + G;
+    int indexLeft = typeLeft + g.typeW + G;
+
+    // Pin icon (only for pinned rows; slot reserved either way)
     int pinSize = std::max(util::Scale(9, g.dpi), g.rowH / 3);
     if (row.pinned) {
         COLORREF pinColor = selected ? theme.selFg : theme.accent;
-        DrawPinIcon(dc, rc.left + 2, rc.top + g.rowH / 2, pinSize, pinColor);
+        DrawPinIcon(dc, pinLeft, rc.top + g.rowH / 2, pinSize, pinColor);
+    }
+
+    // Type icon (every row). Fixed per-type colour + distinct shape = double
+    // cue; selected rows use the selection foreground so it stays legible on
+    // the highlight background.
+    {
+        RECT typeSlot = {typeLeft, rc.top, typeLeft + g.typeW, rc.bottom};
+        COLORREF typeColor = selected ? theme.selFg : TypeIconColor(item->kind, dark);
+        DrawTypeIcon(dc, typeSlot, item->kind, typeColor);
     }
 
     // Unified index (pinned + unpinned continuous)
@@ -434,8 +598,8 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
         indexText = util::Format(L"%d", index + 1);
     }
     RECT indexRc = rc;
-    indexRc.left += g.pinW;
-    indexRc.right = indexRc.left + g.indexW;
+    indexRc.left = indexLeft;
+    indexRc.right = indexLeft + g.indexW;
     SelectObject(dc, g.fontSmall);
     SetTextColor(dc, selected ? theme.selFg : (row.pinned ? theme.accent : theme.dim));
     DrawTextW(dc, indexText.c_str(), -1, &indexRc,
@@ -450,7 +614,7 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     // their text is truncated earlier so the 4 reorder icons fit cleanly
     // between the ellipsis and the right edge of the row (before scrollbar).
     RECT textRc = rc;
-    textRc.left = indexRc.right + g.pad / 2;
+    textRc.left = indexRc.right + G;
     textRc.right = rc.right - g.pad / 2;
     if (row.pinned) {
         textRc.right -= g.sortBtnsW;
@@ -474,16 +638,8 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
         }
     }
 
-    // Rich text indicator badge for RTF/HTML items
-    if (item->kind == ItemKind::Rtf || item->kind == ItemKind::Html) {
-        SelectObject(dc, g.fontSmall);
-        SetTextColor(dc, selected ? theme.selFg : theme.accent);
-        RECT badgeRc = textRc;
-        badgeRc.right = badgeRc.left + g.indexW;
-        DrawTextW(dc, L"RTF", -1, &badgeRc,
-                  DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
-        textRc.left = badgeRc.right + 2;
-    }
+    // (Type is now shown by the per-row type icon in the leading strip, so no
+    // more inline "RTF"/"HTML" text badge here.)
 
     SelectObject(dc, g.font);
     SetTextColor(dc, selected ? theme.selFg : theme.fg);
@@ -1034,9 +1190,15 @@ void ShowRowMenu(int index) {
     g.sel = index;   // Rebuild() inside App::TogglePin/DeleteItem tracks THIS row via oldSelId.
     const Row& row = g.rows[static_cast<size_t>(index)];
     uint64_t rowId = row.id;
+    const Item* item = g.host->GetStore().Find(rowId);
+    // Rich-text items (RTF or HTML) carry formatting and can be flattened to
+    // plain text. These are exactly the rows drawn with the "RTF" badge.
+    const bool isRich = item && (item->kind == ItemKind::Rtf || item->kind == ItemKind::Html);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, i18n::T("popup.menu.copy"));
     AppendMenuW(menu, MF_STRING, 2, i18n::T("popup.menu.paste"));
+    AppendMenuW(menu, MF_STRING | (isRich ? MF_ENABLED : MF_GRAYED), 5,
+                i18n::T("popup.menu.to_plain"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 3,
                 row.pinned ? i18n::T("popup.menu.unpin") : i18n::T("popup.menu.pin"));
@@ -1066,6 +1228,28 @@ void ShowRowMenu(int index) {
         case 4: {
             if (g.host->GetStore().Find(rowId)) {
                 g.host->DeleteItem(rowId);
+                EnsureVisible();
+                UpdateScrollbar();
+                Redraw(false);
+            }
+            break;
+        }
+        case 5: {
+            const Item* it = g.host->GetStore().Find(rowId);
+            if (it && (it->kind == ItemKind::Rtf || it->kind == ItemKind::Html)) {
+                // ConvertToPlainText triggers OnDataChanged -> Rebuild, which
+                // may have removed rowId (merge). Select the survivor it returns.
+                uint64_t survivorId = g.host->ConvertToPlainText(rowId);
+                if (survivorId != 0) {
+                    g.sel = -1;
+                    for (size_t i = 0; i < g.rows.size(); ++i) {
+                        if (g.rows[i].id == survivorId) {
+                            g.sel = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    if (g.sel < 0 && !g.rows.empty()) g.sel = 0;
+                }
                 EnsureVisible();
                 UpdateScrollbar();
                 Redraw(false);

@@ -556,6 +556,18 @@ void App::ReorderPinned(uint64_t id, int targetIndex) {
     }
 }
 
+uint64_t App::ConvertToPlainText(uint64_t id) {
+    // In-place edit: the same entry becomes plain text, staying at its
+    // position. Not a "use", so no reorder / no usedAt change.
+    uint64_t survivor = store_.ConvertToPlainText(id);
+    if (survivor == 0) {
+        return 0;
+    }
+    popup::OnDataChanged();
+    ScheduleSave();
+    return survivor;
+}
+
 void App::SaveLastPos(int x, int y) {
     cfg_.lastPopupX = x;
     cfg_.lastPopupY = y;

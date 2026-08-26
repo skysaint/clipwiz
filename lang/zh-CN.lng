@@ -20,6 +20,7 @@ popup.menu.paste=粘贴
 popup.menu.pin=置顶（永不清理）
 popup.menu.unpin=取消置顶
 popup.menu.delete=删除
+popup.menu.to_plain=转为纯文本
 
 # 设置对话框
 settings.title=ClipWiz 设置
@@ -53,6 +54,7 @@ settings.popup_hotkey=唤出快速粘贴框：
 settings.pinned_group=置顶项快捷键
 settings.position=位置
 settings.win_key=含Win
+settings.win_key_tip=该快捷键包含 Win 键
 settings.ok=确定
 settings.cancel=取消
 

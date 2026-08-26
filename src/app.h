@@ -34,6 +34,7 @@ public:
     void DeleteItem(uint64_t id) override;
     void MovePinned(uint64_t id, int delta) override;
     void ReorderPinned(uint64_t id, int targetIndex) override;
+    uint64_t ConvertToPlainText(uint64_t id) override;
     void OpenSettings() override;
 
     // Snapshot read-only state for crash diagnostics.

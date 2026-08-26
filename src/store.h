@@ -65,6 +65,23 @@ public:
     bool SetPinned(uint64_t id, bool pinned);
     bool Remove(uint64_t id);
     bool Touch(uint64_t id);  // Update usedAt and reorder unpinned section
+
+    // Convert an existing RTF/HTML item into plain text IN PLACE: same id,
+    // same position, same pinned/order/timestamps. Only kind/data/preview/hash
+    // change. This is a content edit, NOT a "use", so it does not reorder.
+    // If the resulting plain text duplicates an existing text entry, the two
+    // are merged (keep the earlier one; keep the pinned one across groups;
+    // never delete when both are pinned).
+    // Returns the id of the surviving entry the caller should select, or 0 if
+    // nothing changed (id not found / not rich text).
+    uint64_t ConvertToPlainText(uint64_t id);
+
+    // "Selective front" (选择性前置操作): the single shared rule for what
+    // "becoming the newest item" means. Pinned items keep their position
+    // (they are nailed down); unpinned items move to the very top of the
+    // unpinned group, everything else shifts down by one. Newer always sits
+    // above older within the unpinned group. Safe to call for any id.
+    void PromoteToFront(uint64_t id);
     
     // Clear all non-pinned items (for clean on exit)
     void ClearNonPinned();

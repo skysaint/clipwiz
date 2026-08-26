@@ -29,6 +29,9 @@ public:
     virtual void DeleteItem(uint64_t id) = 0;
     virtual void MovePinned(uint64_t id, int delta) = 0;
     virtual void ReorderPinned(uint64_t id, int targetIndex) = 0;
+    // Convert the item to plain text in place; returns the id of the entry
+    // that should be selected afterwards (the survivor), or 0 if nothing changed.
+    virtual uint64_t ConvertToPlainText(uint64_t id) = 0;
     virtual void OpenSettings() = 0;
 
 protected:
