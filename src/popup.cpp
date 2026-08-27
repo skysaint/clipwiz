@@ -1490,8 +1490,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     }
                     g.sel = idx;
                     Redraw(false);
-                    // Start drag reorder in pinned area
-                    if (g.rows[static_cast<size_t>(idx)].pinned) {
+                    // Start drag reorder in pinned area (disabled when filter is
+                    // active because filtered row indices don't map 1:1 to the
+                    // full pinned order that MovePinnedTo expects).
+                    if (g.rows[static_cast<size_t>(idx)].pinned &&
+                        !(g.edit && GetWindowTextLengthW(g.edit) > 0)) {
                         g.reorderDrag = true;
                         g.reorderFrom = idx;
                         g.reorderInsert = idx;
@@ -1898,6 +1901,13 @@ void Hide() {
     HidePreview();
     if (!IsWindowVisible(g.hwnd)) {
         return;
+    }
+    // Cancel any in-progress drag reorder
+    if (g.reorderDrag) {
+        g.reorderDrag = false;
+        g.reorderFrom = -1;
+        g.reorderInsert = -1;
+        ReleaseCapture();
     }
     // Remember position
     RECT rc;

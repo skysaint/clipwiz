@@ -48,8 +48,9 @@ bool FileExists(const std::wstring& path) {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-// Extract plain text first line from "HTML Format" raw data (rough: strip tags)
-std::wstring HtmlToPlainText(const std::vector<uint8_t>& data) {
+// Extract plain text from "HTML Format" raw data (rough: strip tags).
+// maxChars limits output length (in UTF-8 bytes before final decode); 0 = unlimited.
+std::wstring HtmlToPlainText(const std::vector<uint8_t>& data, size_t maxBytes = 0) {
     // HTML Format is UTF-8 text; decode properly
     std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
     // Stop at NUL terminator
@@ -90,7 +91,7 @@ std::wstring HtmlToPlainText(const std::vector<uint8_t>& data) {
     // Strip tags, decode HTML entities
     std::string utf8;
     bool inTag = false;
-    for (size_t i = start; i < raw.size() && utf8.size() < 1500; ++i) {
+    for (size_t i = start; i < raw.size() && (maxBytes == 0 || utf8.size() < maxBytes); ++i) {
         char ch = raw[i];
         if (ch == '<') {
             inTag = true;
@@ -205,7 +206,8 @@ static bool IsSkipDestination(const std::string& word) {
 // Extract plain text from RTF raw data
 // Handles: \uNNNN (Unicode), \'xx (code page bytes), \ansicpgN, \ucN
 // Uses a per-group skip stack so nested destinations are handled correctly.
-std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
+// maxChars limits output length (in wchar_t); 0 = unlimited.
+std::wstring RtfToPlainText(const std::vector<uint8_t>& data, size_t maxChars = 0) {
     std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
     // Stop at NUL terminator (clipboard RTF is typically NUL-terminated)
     size_t nulPos = raw.find('\0');
@@ -228,7 +230,7 @@ std::wstring RtfToPlainText(const std::vector<uint8_t>& data) {
         }
     };
 
-    while (i < raw.size() && text.size() < 500) {
+    while (i < raw.size() && (maxChars == 0 || text.size() < maxChars)) {
         char ch = raw[i];
 
         if (ch == '{') {
@@ -548,7 +550,21 @@ std::wstring MakeItemPreview(const Item& item) {
             return util::Format(i18n::T("preview.files"), count, name.c_str());
         }
         default: {
-            std::wstring text = Store::TextOf(item);
+            // For preview, extract only enough text (limit extraction to save time
+            // on large RTF/HTML items — we only display ~160 chars anyway).
+            std::wstring text;
+            constexpr size_t kPreviewLimit = 500;  // wchars, plenty for OneLinePreview(160)
+            switch (item.kind) {
+                case ItemKind::Html:
+                    text = HtmlToPlainText(item.data, kPreviewLimit * 3);  // UTF-8 bytes
+                    break;
+                case ItemKind::Rtf:
+                    text = RtfToPlainText(item.data, kPreviewLimit);
+                    break;
+                default:
+                    text = Store::TextOf(item);
+                    break;
+            }
             std::wstring preview = util::OneLinePreview(text, 160);
             return preview.empty() ? std::wstring(i18n::T("preview.empty")) : preview;
         }
