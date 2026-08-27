@@ -477,16 +477,14 @@ std::wstring Store::TextOf(const Item& item) {
 // A per-kind prefix keeps different kinds distinct: a plain-text "hello" and
 // an RTF "hello" must remain two separate entries (one carries formatting).
 // Images have no text body, so they hash their raw (PNG) bytes.
-static uint64_t CanonicalHash(ItemKind kind, const std::vector<uint8_t>& data) {
-    const char* prefix;
-    std::vector<uint8_t> body;
-    switch (kind) {
-        case ItemKind::Text:      prefix = "TXT:"; break;
-        case ItemKind::FileDrop:  prefix = "FILE:"; break;
-        case ItemKind::Html:      prefix = "HTML:"; break;
-        case ItemKind::Rtf:       prefix = "RTF:"; break;
-        case ItemKind::Image:     prefix = "IMG:"; break;
-        default:                  prefix = "?:"; break;
+
+// The meaningful body used for dedup: extracted plain text for text kinds,
+// raw bytes for images. Empty for rich text that carries no extractable text
+// (formatting-only or unparseable) — callers must NOT treat two empty bodies
+// as duplicates; fall back to raw-byte comparison in that case.
+static std::vector<uint8_t> CanonicalBody(ItemKind kind, const std::vector<uint8_t>& data) {
+    if (kind == ItemKind::Image) {
+        return data;  // No text body: dedup images by raw bytes.
     }
     std::wstring text;
     switch (kind) {
@@ -497,23 +495,57 @@ static uint64_t CanonicalHash(ItemKind kind, const std::vector<uint8_t>& data) {
             break;
         case ItemKind::Html: text = HtmlToPlainText(data); break;
         case ItemKind::Rtf:  text = RtfToPlainText(data);  break;
-        case ItemKind::Image:
-        default:
-            break;
+        default: break;
     }
-    if (kind == ItemKind::Image) {
-        body = data;  // No text body: dedup images by raw bytes.
-    } else {
-        body.assign(reinterpret_cast<const uint8_t*>(text.data()),
-                    reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
+    return std::vector<uint8_t>(
+        reinterpret_cast<const uint8_t*>(text.data()),
+        reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
+}
+
+static const char* CanonicalPrefix(ItemKind kind) {
+    switch (kind) {
+        case ItemKind::Text:     return "TXT:";
+        case ItemKind::FileDrop: return "FILE:";
+        case ItemKind::Html:     return "HTML:";
+        case ItemKind::Rtf:      return "RTF:";
+        case ItemKind::Image:    return "IMG:";
+        default:                 return "?:";
     }
-    // Prepend the type prefix bytes, then the body, and hash the whole.
+}
+
+static uint64_t CanonicalHash(ItemKind kind, const std::vector<uint8_t>& data) {
+    const std::vector<uint8_t> body = CanonicalBody(kind, data);
+    const char* prefix = CanonicalPrefix(kind);
     std::vector<uint8_t> buf;
     const size_t plen = std::strlen(prefix);
     buf.reserve(plen + body.size());
     buf.insert(buf.end(), prefix, prefix + plen);
     buf.insert(buf.end(), body.begin(), body.end());
     return util::Hash64(buf.data(), buf.size());
+}
+
+// The single shared "these two are the same content" predicate, used by Add(),
+// Load() dedup, and conversion merges. Two items match when they are the same
+// kind and same canonical hash AND either:
+//   - the incoming canonical body is non-empty (a real plain-text/image match), or
+//   - their raw bytes are byte-equal (fallback for empty-body rich text and as
+//     a hash-collision safety belt — prevents unrelated formatting-only RTF/HTML
+//     from merging just because both extract to empty text).
+// `incomingBodyEmpty` is precomputed once by the caller to avoid re-extracting
+// the incoming plain text on every comparison.
+static bool SameCanonicalContent(const Item& existing, ItemKind kind,
+                                 const std::vector<uint8_t>& data, uint64_t hash,
+                                 bool incomingBodyEmpty) {
+    if (existing.kind != kind || existing.hash != hash) return false;
+    if (!incomingBodyEmpty) return true;     // real body match
+    return existing.data == data;            // empty body: require exact bytes
+}
+
+// Convenience overload: extracts the body itself (single-comparison callers).
+static bool SameCanonicalContent(const Item& existing, ItemKind kind,
+                                 const std::vector<uint8_t>& data, uint64_t hash) {
+    return SameCanonicalContent(existing, kind, data, hash,
+                                CanonicalBody(kind, data).empty());
 }
 
 std::wstring MakeItemPreview(const Item& item) {
@@ -705,13 +737,19 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     // Dedup by canonical content (plain-text body + type prefix), NOT raw bytes:
     // Word/browsers emit different RTF/HTML bytes for the exact same passage.
     const uint64_t hash = CanonicalHash(kind, data);
+    const bool bodyEmpty = CanonicalBody(kind, data).empty();
     const uint64_t now = util::NowFileTime();
 
     // Dedup: same kind + same canonical content. On a hit we KEEP THE NEW
     // content (the user may have re-edited formatting/images before recopying,
     // and expects to paste the latest version), then apply 选择性前置操作.
+    //
+    // NOTE: items_ is NOT guaranteed to hold at most one entry per canonical
+    // hash. ConvertToPlainText's "both pinned" branch and Load() may leave two
+    // identical-hash entries coexisting. This loop refreshes the FIRST match in
+    // display order, which is the intended behavior (the topmost duplicate).
     for (Item& item : items_) {
-        if (item.kind == kind && item.hash == hash) {
+        if (SameCanonicalContent(item, kind, data, hash, bodyEmpty)) {
             const uint64_t dupId = item.id;
             // Refresh the stored bytes to the newest copy (same canonical hash).
             item.data = std::move(data);
@@ -788,6 +826,32 @@ void Store::RefreshPreviews() {
     }
 }
 
+void Store::DedupAll() {
+    // Merge duplicate canonical-content items. Keep the one earlier in display
+    // order (smaller index), drop the later one; but never remove a pinned item
+    // when its duplicate is also pinned (pinned = user-only deletion). Assumes
+    // items_ is already normalized so indices reflect display order.
+    bool changed = false;
+    for (size_t i = 0; i < items_.size(); ++i) {
+        const bool bodyEmpty = CanonicalBody(items_[i].kind, items_[i].data).empty();
+        for (size_t j = i + 1; j < items_.size();) {
+            if (SameCanonicalContent(items_[j], items_[i].kind, items_[i].data,
+                                     items_[i].hash, bodyEmpty)) {
+                if (items_[i].pinned && items_[j].pinned) {
+                    ++j;  // Both pinned: keep both, leave the duplicate in place.
+                    continue;
+                }
+                items_.erase(items_.begin() + static_cast<ptrdiff_t>(j));
+                changed = true;
+                // don't advance j: the erased slot now holds the next item
+            } else {
+                ++j;
+            }
+        }
+    }
+    if (changed && !items_.empty()) Normalize(items_);
+}
+
 uint64_t Store::ConvertToPlainText(uint64_t id) {
     size_t idx = items_.size();
     for (size_t i = 0; i < items_.size(); ++i) {
@@ -832,9 +896,8 @@ uint64_t Store::ConvertToPlainText(uint64_t id) {
     size_t dupIdx = items_.size();
     for (size_t i = 0; i < items_.size(); ++i) {
         if (i == idx) continue;
-        const Item& other = items_[i];
-        if (other.kind == ItemKind::Text && other.hash == newHash &&
-            other.data == items_[idx].data) {  // data == as collision safety belt
+        // Shared predicate: hash match with an empty-body / collision safety belt.
+        if (SameCanonicalContent(items_[i], ItemKind::Text, items_[idx].data, newHash)) {
             dupIdx = i;
             break;
         }
@@ -1028,6 +1091,11 @@ Store::LoadResult Store::Load() {
     // for v2 files, SortByOrder arranges by persisted order values.
     // Either way, Normalize produces contiguous [1..P] + [10001..10001+U-1].
     Normalize(items_);
+    // A store written before canonical hashing (v1.1.0 raw-byte dedup) can hold
+    // items that now hash identically (e.g. rich text that flattens alike).
+    // Merge them so the loaded state honors the same "no duplicates" invariant
+    // that Add() maintains.
+    DedupAll();
     Evict();
     return LoadResult::Ok;
 }

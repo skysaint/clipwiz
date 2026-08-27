@@ -119,6 +119,7 @@ private:
     Item* FindMutable(uint64_t id);
     void Evict();
     bool EvictOneOldestUnpinned();
+    void DedupAll();  // Merge duplicate canonical-content items (used after Load)
     LoadResult PreserveCorrupt();
 
     std::vector<Item> items_;  // Pinned section first (order asc), then unpinned (order asc)

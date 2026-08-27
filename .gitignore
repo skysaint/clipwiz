@@ -6,6 +6,9 @@ build-debug/
 data/
 portable.txt
 
+# 代码审查报告（本地产物）
+semantic-review/
+
 # IDE / 编辑器
 .vs/
 *.user
