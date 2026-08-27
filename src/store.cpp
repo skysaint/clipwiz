@@ -782,6 +782,12 @@ void Store::ClearNonPinned() {
     if (!items_.empty()) Normalize(items_);
 }
 
+void Store::RefreshPreviews() {
+    for (Item& item : items_) {
+        item.preview = MakeItemPreview(item);
+    }
+}
+
 uint64_t Store::ConvertToPlainText(uint64_t id) {
     size_t idx = items_.size();
     for (size_t i = 0; i < items_.size(); ++i) {

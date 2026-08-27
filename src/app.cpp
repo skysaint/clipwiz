@@ -634,6 +634,9 @@ void App::ApplyConfig() {
     ApplyTheme();
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
     i18n::Init(cfg_.language);
+    // Language may have changed: cached item previews (image/file localized
+    // strings) must be rebuilt under the new locale.
+    store_.RefreshPreviews();
     logger::SetMinLevel(logger::ParseLevel(cfg_.logLevel.empty() ? "error"
                                           : util::Narrow(cfg_.logLevel)));
     popup::OnThemeChanged();

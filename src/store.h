@@ -86,6 +86,11 @@ public:
     // Clear all non-pinned items (for clean on exit)
     void ClearNonPinned();
 
+    // Recompute every item's cached preview string. Call after a language
+    // change: previews for image/file items contain localized words and are
+    // cached at Add/Load time, so they must be rebuilt when the locale switches.
+    void RefreshPreviews();
+
     // Pinned item reordering
     bool MovePinned(uint64_t id, int delta);         // Move up/down by delta positions
     bool MovePinnedTo(uint64_t id, int targetIndex); // Drag to target position
