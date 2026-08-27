@@ -14,6 +14,7 @@
 #include "i18n.h"
 #include "imagecodec.h"
 #include "paste.h"
+#include "resource.h"
 
 namespace popup {
 namespace {
@@ -75,6 +76,11 @@ struct State {
 
     // Thumbnail cache
     std::vector<std::pair<uint64_t, Thumb>> thumbs;
+
+    // Per-row type icons: [kind*2 + dark] -> HICON, loaded at current typeW.
+    // Non-shared handles; destroyed and reloaded on DPI change.
+    HICON typeIcons[10] = {};
+    int typeIconSize = 0;  // size the cached icons were loaded at
 
     // Pinned item drag reorder
     bool reorderDrag = false;
@@ -407,137 +413,59 @@ void DrawPinIcon(HDC dc, int x, int cy, int size, COLORREF color) {
     DeleteObject(brush);
 }
 
-// Draw a small, equal-width type indicator for every row inside `slot`.
-// Pure GDI vector art so it stays crisp at any DPI and recolors with theme.
-// Fixed per-type accent color (colour + shape = double cue). Two palettes so
-// contrast holds on both light and dark backgrounds. Selected rows override
-// this with the selection foreground (handled by the caller).
-COLORREF TypeIconColor(ItemKind kind, bool dark) {
+// Per-row content type icon, loaded from an .ico resource. Two variants per
+// type (light / dark) so the fixed-colour art keeps contrast on either
+// background. Icons are cached at the current slot size and reloaded on DPI
+// change (see cache invalidation alongside the thumbnail cache).
+int TypeIconResId(ItemKind kind, bool dark) {
     switch (kind) {
-        case ItemKind::Text:                       // blue
-            return dark ? RGB(0x6f, 0xb1, 0xff) : RGB(0x1f, 0x6f, 0xd0);
-        case ItemKind::Rtf:                        // purple
-            return dark ? RGB(0xc0, 0x8c, 0xff) : RGB(0x7d, 0x3c, 0xc4);
-        case ItemKind::Html:                       // orange
-            return dark ? RGB(0xff, 0xa5, 0x4d) : RGB(0xd9, 0x6a, 0x0f);
-        case ItemKind::Image:                      // green
-            return dark ? RGB(0x5f, 0xc9, 0x84) : RGB(0x1f, 0x9d, 0x55);
-        case ItemKind::FileDrop:                   // teal / slate
-        default:
-            return dark ? RGB(0x5f, 0xbf, 0xc9) : RGB(0x2a, 0x8a, 0x99);
+        case ItemKind::Text:  return dark ? IDI_TYPE_TEXT_DARK  : IDI_TYPE_TEXT_LIGHT;
+        case ItemKind::Rtf:   return dark ? IDI_TYPE_RTF_DARK   : IDI_TYPE_RTF_LIGHT;
+        case ItemKind::Html:  return dark ? IDI_TYPE_HTML_DARK  : IDI_TYPE_HTML_LIGHT;
+        case ItemKind::Image: return dark ? IDI_TYPE_IMAGE_DARK : IDI_TYPE_IMAGE_LIGHT;
+        case ItemKind::FileDrop:
+        default:              return dark ? IDI_TYPE_FILE_DARK  : IDI_TYPE_FILE_LIGHT;
     }
 }
 
-// Per-row type indicator. Shapes are deliberately distinct so they read even
-// at tiny sizes; colour reinforces the distinction (double cue).
-// TXT  = three text lines
-// RTF  = a capital "A" with a style underline (font / formatting)
-// HTML = angle brackets < >
-// IMG  = picture frame with a mountain/sun
-// FILE = a document page with a folded corner
-void DrawTypeIcon(HDC dc, const RECT& slot, ItemKind kind, COLORREF color) {
-    // Inner drawing box: square, centered in the slot with a small inset.
-    int side = std::min(slot.right - slot.left, slot.bottom - slot.top);
-    int inset = std::max(1, side / 6);
-    int box = side - inset * 2;
-    if (box < 4) box = 4;
-    int left = slot.left + (slot.right - slot.left - box) / 2;
-    int top  = slot.top + (slot.bottom - slot.top - box) / 2;
-    int right = left + box;
-    int bottom = top + box;
-    int pw = std::max(1, box / 10);
-
-    HPEN pen = CreatePen(PS_SOLID, pw, color);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-
-    switch (kind) {
-        case ItemKind::Text: {
-            // Three horizontal text lines (last one shorter).
-            int lines = 3;
-            int gap = box / (lines + 1);
-            for (int i = 1; i <= lines; ++i) {
-                int y = top + gap * i;
-                int x2 = (i == lines) ? left + box * 2 / 3 : right;
-                MoveToEx(dc, left, y, nullptr);
-                LineTo(dc, x2, y);
-            }
-            break;
+// Return a cached HICON for (kind, dark) sized to fit `slot`. Loads on demand.
+HICON GetTypeIcon(ItemKind kind, bool dark, int slotSize) {
+    // If the slot size changed (DPI switch), drop the whole cache and reload.
+    if (g.typeIconSize != slotSize) {
+        for (HICON& h : g.typeIcons) {
+            if (h) { DestroyIcon(h); h = nullptr; }
         }
-        case ItemKind::Rtf: {
-            // A capital "A" with a style underline — the universal "font /
-            // formatting" glyph, so it reads as rich/formatted text. Drawn as
-            // strokes (not a font) to stay crisp at tiny sizes.
-            int cx = (left + right) / 2;
-            int apexY = top;                 // top of the A
-            int baseY = bottom - box / 4;    // where the legs end (above underline)
-            int legHalf = box * 2 / 5;       // half-spread of the legs at the base
-            // Left and right diagonal strokes.
-            MoveToEx(dc, cx - legHalf, baseY, nullptr);
-            LineTo(dc, cx, apexY);
-            LineTo(dc, cx + legHalf, baseY);
-            // Crossbar.
-            int barY = top + box / 2;
-            int barHalf = legHalf / 2;
-            MoveToEx(dc, cx - barHalf, barY, nullptr);
-            LineTo(dc, cx + barHalf, barY);
-            // Style underline (bold-ish) under the whole letter.
-            HBRUSH ul = CreateSolidBrush(color);
-            RECT ulRc = {left, bottom - std::max(1, box / 8), right, bottom};
-            FillRect(dc, &ulRc, ul);
-            DeleteObject(ul);
-            break;
-        }
-        case ItemKind::Html: {
-            // Angle brackets  < >
-            int midY = (top + bottom) / 2;
-            int q = box / 4;
-            // left bracket
-            MoveToEx(dc, left + q, top + q, nullptr);
-            LineTo(dc, left, midY);
-            LineTo(dc, left + q, bottom - q);
-            // right bracket
-            MoveToEx(dc, right - q, top + q, nullptr);
-            LineTo(dc, right, midY);
-            LineTo(dc, right - q, bottom - q);
-            break;
-        }
-        case ItemKind::Image: {
-            // Picture frame + mountain + sun
-            Rectangle(dc, left, top, right, bottom);
-            int baseY = bottom - box / 5;
-            // sun
-            int sunR = std::max(1, box / 8);
-            int sunCx = left + box / 3;
-            int sunCy = top + box / 3;
-            Ellipse(dc, sunCx - sunR, sunCy - sunR, sunCx + sunR, sunCy + sunR);
-            // mountain
-            MoveToEx(dc, left + pw, baseY, nullptr);
-            LineTo(dc, left + box / 2, top + box / 2);
-            LineTo(dc, right - pw, baseY);
-            break;
-        }
-        case ItemKind::FileDrop:
-        default: {
-            // Document page with a folded top-right corner
-            int fold = box / 3;
-            MoveToEx(dc, left, top, nullptr);
-            LineTo(dc, right - fold, top);
-            LineTo(dc, right, top + fold);
-            LineTo(dc, right, bottom);
-            LineTo(dc, left, bottom);
-            LineTo(dc, left, top);
-            // fold line
-            MoveToEx(dc, right - fold, top, nullptr);
-            LineTo(dc, right - fold, top + fold);
-            LineTo(dc, right, top + fold);
-            break;
-        }
+        g.typeIconSize = slotSize;
     }
+    int kindIdx;
+    switch (kind) {
+        case ItemKind::Text:     kindIdx = 0; break;
+        case ItemKind::Rtf:      kindIdx = 1; break;
+        case ItemKind::Html:     kindIdx = 2; break;
+        case ItemKind::Image:    kindIdx = 3; break;
+        case ItemKind::FileDrop:
+        default:                 kindIdx = 4; break;
+    }
+    int slot = kindIdx * 2 + (dark ? 1 : 0);
+    if (!g.typeIcons[slot]) {
+        // Request the exact size; a multi-size .ico lets Windows pick the best
+        // embedded frame to scale from. Non-shared so we own the handle.
+        g.typeIcons[slot] = static_cast<HICON>(
+            LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TypeIconResId(kind, dark)),
+                       IMAGE_ICON, slotSize, slotSize, LR_DEFAULTCOLOR));
+    }
+    return g.typeIcons[slot];
+}
 
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(pen);
+// Per-row type indicator: draw the .ico centered in `slot`.
+void DrawTypeIcon(HDC dc, const RECT& slot, ItemKind kind, bool dark) {
+    int side = std::min(slot.right - slot.left, slot.bottom - slot.top);
+    if (side < 4) side = 4;
+    HICON icon = GetTypeIcon(kind, dark, side);
+    if (!icon) return;
+    int x = slot.left + (slot.right - slot.left - side) / 2;
+    int y = slot.top + (slot.bottom - slot.top - side) / 2;
+    DrawIconEx(dc, x, y, icon, side, side, 0, nullptr, DI_NORMAL);
 }
 
 void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
@@ -583,13 +511,14 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
         DrawPinIcon(dc, pinLeft, rc.top + g.rowH / 2, pinSize, pinColor);
     }
 
-    // Type icon (every row). Fixed per-type colour + distinct shape = double
-    // cue; selected rows use the selection foreground so it stays legible on
-    // the highlight background.
+    // Type icon (every row). Pick the light/dark icon variant by the actual
+    // row background brightness (selection / pinned rows can differ from the
+    // base theme) so the fixed-colour art keeps enough contrast.
     {
         RECT typeSlot = {typeLeft, rc.top, typeLeft + g.typeW, rc.bottom};
-        COLORREF typeColor = selected ? theme.selFg : TypeIconColor(item->kind, dark);
-        DrawTypeIcon(dc, typeSlot, item->kind, typeColor);
+        bool bgDark = (GetRValue(rowBg) * 299 + GetGValue(rowBg) * 587 +
+                       GetBValue(rowBg) * 114) / 1000 < 128;
+        DrawTypeIcon(dc, typeSlot, item->kind, bgDark);
     }
 
     // Unified index (pinned + unpinned continuous)
@@ -1807,6 +1736,10 @@ void Shutdown() {
         DestroyWindow(g.hwnd);
         g.hwnd = nullptr;
     }
+    for (HICON& h : g.typeIcons) {
+        if (h) { DestroyIcon(h); h = nullptr; }
+    }
+    g.typeIconSize = 0;
 }
 
 void Show() {

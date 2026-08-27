@@ -6,6 +6,18 @@
 #define IDI_APPICON                 101
 #define IDI_WINBADGE                102
 
+// Per-row content type icons (light / dark theme variants)
+#define IDI_TYPE_TEXT_LIGHT         110
+#define IDI_TYPE_TEXT_DARK          111
+#define IDI_TYPE_RTF_LIGHT          112
+#define IDI_TYPE_RTF_DARK           113
+#define IDI_TYPE_HTML_LIGHT         114
+#define IDI_TYPE_HTML_DARK          115
+#define IDI_TYPE_IMAGE_LIGHT        116
+#define IDI_TYPE_IMAGE_DARK         117
+#define IDI_TYPE_FILE_LIGHT         118
+#define IDI_TYPE_FILE_DARK          119
+
 // Built-in language resources (compiled from lang/*.lng)
 #define IDR_LNG_ZHCN                2001
 

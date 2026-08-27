@@ -9,6 +9,18 @@ IDI_APPICON             ICON            "clipwiz.ico"
 IDI_WINBADGE            ICON            "windows.ico"
 1                       RT_MANIFEST     "app.manifest"
 
+// Per-row content type icons (light / dark theme variants)
+IDI_TYPE_TEXT_LIGHT     ICON            "../res/icon-text-light.ico"
+IDI_TYPE_TEXT_DARK      ICON            "../res/icon-text-dark.ico"
+IDI_TYPE_RTF_LIGHT      ICON            "../res/icon-rtf-light.ico"
+IDI_TYPE_RTF_DARK       ICON            "../res/icon-rtf-dark.ico"
+IDI_TYPE_HTML_LIGHT     ICON            "../res/icon-html-light.ico"
+IDI_TYPE_HTML_DARK      ICON            "../res/icon-html-dark.ico"
+IDI_TYPE_IMAGE_LIGHT    ICON            "../res/icon-image-light.ico"
+IDI_TYPE_IMAGE_DARK     ICON            "../res/icon-image-dark.ico"
+IDI_TYPE_FILE_LIGHT     ICON            "../res/icon-file-light.ico"
+IDI_TYPE_FILE_DARK      ICON            "../res/icon-file-dark.ico"
+
 /////////////////////////////////////////////////////////////////////////////
 // Built-in language pack (compiled from lang/zh-CN.lng)
 
