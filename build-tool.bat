@@ -65,20 +65,24 @@ echo   [1] Init       - cmake configure (VS 2022 x64)
 echo   [2] Build      - Release build
 echo   [3] Debug      - Debug build
 echo   [4] Rebuild    - Clean + Release build
-echo   [5] Clean      - Remove build directory
+echo   [5] RebuildDbg - Clean + Debug build
+echo   [6] Test       - Build + run clipwiz_tests
+echo   [7] Clean      - Remove build directory
 echo   [0] Exit
 echo.
 
 :PROMPT
 set "choice="
-set /p "choice=  Select (0-5): "
+set /p "choice=  Select (0-7): "
 if "!choice!"=="" goto :PROMPT
 
 if "!choice!"=="1" goto :DO_INIT
 if "!choice!"=="2" goto :DO_BUILD
 if "!choice!"=="3" goto :DO_DEBUG
 if "!choice!"=="4" goto :DO_REBUILD
-if "!choice!"=="5" goto :DO_CLEAN
+if "!choice!"=="5" goto :DO_REBUILD_DEBUG
+if "!choice!"=="6" goto :DO_TEST
+if "!choice!"=="7" goto :DO_CLEAN
 if "!choice!"=="0" exit /b 0
 goto :PROMPT
 
@@ -188,6 +192,40 @@ pause
 goto :MENU_START
 
 :: ============================================================
+:: Rebuild Debug (clean + debug)
+:: ============================================================
+:DO_REBUILD_DEBUG
+echo.
+echo  [RebuildDbg] Clean + Debug build ...
+echo.
+if not exist build\CMakeCache.txt (
+    echo  [RebuildDbg] Not configured yet. Running init first ...
+    echo.
+    call "%ComSpec%" /c "chcp 65001 >nul && cmake -S . -B build -G "Visual Studio 17 2022" -A x64"
+    if !ERRORLEVEL! neq 0 (
+        echo.
+        echo  [Init] FAILED.
+        if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
+        pause
+        goto :MENU_START
+    )
+    echo.
+)
+call "%ComSpec%" /c "chcp 65001 >nul && cmake --build build --config Debug --clean-first"
+if !ERRORLEVEL! neq 0 (
+    echo.
+    echo  [RebuildDbg] FAILED.
+    if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
+    pause
+    goto :MENU_START
+)
+echo.
+echo  [RebuildDbg] Done. Output: build\Debug\clipwiz.exe
+if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
+pause
+goto :MENU_START
+
+:: ============================================================
 :: Rebuild (clean + release)
 :: ============================================================
 :DO_REBUILD
@@ -250,6 +288,59 @@ pause
 goto :MENU_START
 
 :: ============================================================
+:: Test (build clipwiz_tests, then run it)
+::
+:: The test target is EXCLUDE_FROM_ALL, so options 2/3/4 never pay for it.
+:: The scratch dir is passed explicitly and lives under build\ so a test run
+:: cannot touch the real %APPDATA%\ClipWiz store.
+:: ============================================================
+:DO_TEST
+echo.
+echo  [Test] Building clipwiz_tests (Release) ...
+echo.
+if not exist build\CMakeCache.txt (
+    echo  [Test] Not configured yet. Running init first ...
+    echo.
+    call "%ComSpec%" /c "chcp 65001 >nul && cmake -S . -B build -G "Visual Studio 17 2022" -A x64"
+    if !ERRORLEVEL! neq 0 (
+        echo.
+        echo  [Init] FAILED.
+        if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
+        pause
+        goto :MENU_START
+    )
+    echo.
+)
+call "%ComSpec%" /c "chcp 65001 >nul && cmake --build build --config Release --target clipwiz_tests"
+if !ERRORLEVEL! neq 0 (
+    echo.
+    echo  [Test] BUILD FAILED.
+    if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
+    pause
+    goto :MENU_START
+)
+echo.
+echo  [Test] Running clipwiz_tests ...
+echo.
+set "_scratch=%~dp0build\test-scratch"
+call "%ComSpec%" /c "chcp 65001 >nul && ""%~dp0build\Release\clipwiz_tests.exe"" ""!_scratch!"""
+set "_test_rc=!ERRORLEVEL!"
+set "_scratch="
+echo.
+if !_test_rc! neq 0 (
+    echo  [Test] FAILED - exit code !_test_rc!.
+    set "_test_rc="
+    if "!double_clicked!"=="false" if not "%~1"=="" exit /b 1
+    pause
+    goto :MENU_START
+)
+set "_test_rc="
+echo  [Test] All checks passed.
+if "!double_clicked!"=="false" if not "%~1"=="" exit /b 0
+pause
+goto :MENU_START
+
+:: ============================================================
 :: CLI dispatch
 :: ============================================================
 :CLI_DISPATCH
@@ -257,7 +348,9 @@ if /i "%~1"=="init"       goto :DO_INIT
 if /i "%~1"=="build"      goto :DO_BUILD
 if /i "%~1"=="debug"      goto :DO_DEBUG
 if /i "%~1"=="rebuild"    goto :DO_REBUILD
+if /i "%~1"=="rebuilddebug" goto :DO_REBUILD_DEBUG
 if /i "%~1"=="clean"      goto :DO_CLEAN
+if /i "%~1"=="test"       goto :DO_TEST
 goto :USAGE
 
 :: ============================================================
@@ -272,6 +365,8 @@ echo    init       cmake configure (Visual Studio 17 2022, x64)
 echo    build      Build Release
 echo    debug      Build Debug
 echo    rebuild    Clean + Release build
+echo    rebuilddebug  Clean + Debug build
+echo    test       Build clipwiz_tests and run the guard-rail suite
 echo    clean      Remove build directory
 echo.
 echo  No arguments + double-click from explorer = interactive menu.

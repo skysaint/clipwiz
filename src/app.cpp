@@ -2,18 +2,31 @@
 #include "app.h"
 
 #include <algorithm>
+#include <commdlg.h>
+#include <shlobj.h>
 
 #include "clipboard.h"
 #include "i18n.h"
 #include "imagecodec.h"
 #include "log.h"
+#include "merge.h"
 #include "paste.h"
 #include "resource.h"
+#include "textconv.h"
+#include "transform.h"
 #include "tray.h"
 
 namespace {
 
 const wchar_t kMainClass[] = L"ClipWizMain";
+// File-dialog filter for .clpw backups, in the "label\0pattern\0\0" form that
+// OPENFILENAME.lpstrFilter expects. An array literal is used deliberately: it
+// keeps the embedded NULs, whereas a wchar_t* / std::wstring built from one
+// would stop at the first NUL and hand the dialog a truncated filter.
+const wchar_t kClpwFilter[] = L"ClipWiz Backup (*.clpw)\0*.clpw\0";
+// Save-single-item filters, same double-NUL form as kClpwFilter above.
+const wchar_t kTxtFilter[] = L"Text File (*.txt)\0*.txt\0";
+const wchar_t kPngFilter[] = L"PNG Image (*.png)\0*.png\0";
 constexpr UINT kMsgTray = WM_APP + 1;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTimerSave = 1;
@@ -25,6 +38,59 @@ constexpr int kWriteCheckMs = 200;
 
 // Prompt cleanup when total exceeds this value (100 MB)
 constexpr uint64_t kSizeWarnBytes = 100ULL * 1024 * 1024;
+
+// wstring -> UTF-16LE bytes with no NUL terminator, the exact shape store.cpp and
+// clipboard.cpp use for Text payloads. The transform entry points build a Text
+// item out of a wstring and hand it to Add() / WriteItem().
+std::vector<uint8_t> Utf16Bytes(const std::wstring& s) {
+    const auto* p = reinterpret_cast<const uint8_t*>(s.data());
+    return std::vector<uint8_t>(p, p + s.size() * sizeof(wchar_t));
+}
+
+// "YYYY-MM-DD HH:MM:SS" in local time for the AppendDateTime transform. Formatted
+// here, not in transform.cpp, so that unit never reads the clock and stays a pure,
+// testable function — Apply just concatenates whatever string it is handed.
+std::wstring CurrentDateTimeStamp() {
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    return util::Format(L"%04u-%02u-%02u %02u:%02u:%02u",
+                        static_cast<unsigned>(st.wYear), static_cast<unsigned>(st.wMonth),
+                        static_cast<unsigned>(st.wDay), static_cast<unsigned>(st.wHour),
+                        static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond));
+}
+
+// Reveal a captured file list in Explorer. A FileDrop item stores its paths as
+// UTF-16LE, one per line (clipboard.cpp GetFileDrop). Explorer selects within a
+// single folder, so this reveals the first path's folder with that file
+// selected — the honest choice for a drop that may span several folders. COM is
+// already STA-initialized on this thread (main.cpp), which SHParseDisplayName
+// and SHOpenFolderAndSelectItems require.
+void RevealFirstPath(HWND owner, const Item& item) {
+    const std::wstring all(reinterpret_cast<const wchar_t*>(item.data.data()),
+                           item.data.size() / sizeof(wchar_t));
+    const size_t nl = all.find(L'\n');
+    std::wstring first = (nl == std::wstring::npos) ? all : all.substr(0, nl);
+    if (!first.empty() && first.back() == L'\r') {
+        first.pop_back();
+    }
+    if (first.empty()) {
+        util::ErrorBox(owner, i18n::T("msg.reveal_failed"));
+        return;
+    }
+    PIDLIST_ABSOLUTE full = nullptr;
+    if (FAILED(SHParseDisplayName(first.c_str(), nullptr, &full, 0, nullptr)) || full == nullptr) {
+        util::ErrorBox(owner, i18n::T("msg.reveal_failed"));
+        return;
+    }
+    // pidlFolder = NULL with one absolute child pidl: Explorer opens the file's
+    // parent folder and selects the file. apidl borrows `full`, freed after.
+    PCUITEMID_CHILD apidl[1] = {reinterpret_cast<PCUITEMID_CHILD>(full)};
+    const HRESULT hr = SHOpenFolderAndSelectItems(nullptr, 1, apidl, 0);
+    CoTaskMemFree(full);
+    if (FAILED(hr)) {
+        util::ErrorBox(owner, i18n::T("msg.reveal_failed"));
+    }
+}
 
 }  // namespace
 
@@ -41,6 +107,7 @@ bool App::Init(HINSTANCE inst) {
     // Load config
     settings::Load(cfg_);
     settings::Clamp(cfg_);
+    blockRules_ = blocklist::Parse(cfg_.blockRules);
 
     // Apply configured log level (default Error if unset/invalid)
     logger::SetMinLevel(logger::ParseLevel(cfg_.logLevel.empty() ? "error"
@@ -86,6 +153,9 @@ bool App::Init(HINSTANCE inst) {
     // Set limits before loading so Load's internal Evict uses the user's configured limit,
     // not the default 50. This prevents truncating history on startup.
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
+    // Likewise set the mask config before Load, so Load's FillDerived masks each
+    // item's preview/searchText as it is read. No separate refresh needed here.
+    store_.SetMaskConfig(cfg_.mask);
 
     // Load data
     Store::LoadResult lr = store_.Load();
@@ -337,19 +407,48 @@ void App::OnClipboardUpdate() {
     ItemKind kind;
     std::vector<uint8_t> data;
     uint32_t imgW = 0, imgH = 0;
-    if (!clip::Capture(kind, data, imgW, imgH, cfg_.maxTextBytes, cfg_.maxImagePixels)) {
+    std::wstring sourceApp;
+    if (!clip::Capture(kind, data, imgW, imgH, sourceApp, blockRules_, cfg_.maxTextBytes,
+                       cfg_.maxImagePixels)) {
         return;
     }
-    store_.Add(kind, std::move(data), imgW, imgH);
+    store_.Add(kind, std::move(data), imgW, imgH, sourceApp);
     popup::OnDataChanged();
     ScheduleSave();
     CheckStoreSize();
 }
 
 void App::OnHotkey(int id) {
+    // A FullDisable app ignores clipwiz hotkeys entirely: neither the popup nor
+    // a positional paste should fire while such a window is in front. Guarded by
+    // the empty check so the common no-blocklist case pays no window lookup.
+    if (!blockRules_.empty() &&
+        blocklist::Classify(blockRules_, clip::ResolveTarget(GetForegroundWindow())) ==
+            blocklist::Action::FullDisable) {
+        return;
+    }
     if (id == hotkey::kIdPopup) {
         paste::CaptureCurrentForeground();
         popup::Toggle();
+        return;
+    }
+    if (id == hotkey::kIdPasteQueue) {
+        // Sequential paste: pop the front of the queue and paste it. An empty
+        // queue is a silent no-op — never an error box. Ids whose item has since
+        // been deleted are skipped so one stale entry doesn't swallow a press.
+        if (queue_.empty()) {
+            return;
+        }
+        paste::CaptureCurrentForeground();
+        while (!queue_.empty()) {
+            const uint64_t front = queue_.front();
+            queue_.erase(queue_.begin());
+            if (store_.Find(front) != nullptr) {
+                PasteItem(front);  // re-Finds, writes clipboard, pastes, refreshes popup
+                return;
+            }
+        }
+        popup::OnDataChanged();  // held only stale ids; clear any badges
         return;
     }
     // Positional: id = kIdItemBase + position index
@@ -424,6 +523,14 @@ void App::OnCommand(UINT cmd) {
         ClearHistory();
         return;
     }
+    if (cmd == tray::CmdExport) {
+        ExportBackup();
+        return;
+    }
+    if (cmd == tray::CmdImport) {
+        ImportBackup();
+        return;
+    }
     if (cmd == tray::CmdAutostart) {
         util::SetAutostart(!util::GetAutostart());
         return;
@@ -490,7 +597,7 @@ void App::PasteItem(uint64_t id) {
     store_.Touch(id);
     popup::OnDataChanged();
     ScheduleSave();
-    paste::Execute(cfg_.pasteDelayMs);
+    paste::Execute(cfg_.pasteDelayMs, cfg_.pasteKey);
 }
 
 void App::CopyItem(uint64_t id) {
@@ -568,6 +675,140 @@ uint64_t App::ConvertToPlainText(uint64_t id) {
     return survivor;
 }
 
+uint64_t App::MergeItems(const std::vector<uint64_t>& ids) {
+    // Collect the live items in the order the caller passed them — popup hands
+    // them over top-to-bottom as shown, so the merged text reads in list order.
+    // An id that vanished since the menu opened is simply skipped.
+    std::vector<const Item*> items;
+    items.reserve(ids.size());
+    for (uint64_t id : ids) {
+        if (const Item* it = store_.Find(id)) {
+            items.push_back(it);
+        }
+    }
+    if (!merge::CanMerge(items)) {
+        return 0;
+    }
+    const std::wstring sep = merge::SeparatorText(cfg_.mergeSep, cfg_.mergeSepCustom);
+    ItemKind kind = ItemKind::Text;
+    std::vector<uint8_t> data;
+    if (!merge::Merge(items, sep, kind, data)) {
+        return 0;
+    }
+    // A brand-new entry via Add(), never an in-place edit: the sources stay as
+    // they were, and Add's canonical dedup means a result that already exists in
+    // history surfaces that entry instead of storing a duplicate.
+    const uint64_t newId = store_.Add(kind, std::move(data));
+    popup::OnDataChanged();
+    ScheduleSave();
+    return newId;
+}
+
+bool App::TransformItemText(uint64_t id, transform::Kind kind, std::wstring& out) {
+    const Item* item = store_.Find(id);
+    if (!item) {
+        return false;
+    }
+    // Transforms read prose. An image's canonical body is raw PNG bytes and a file
+    // list is paths, neither of which a case/whitespace rule can meaningfully
+    // touch, so both are refused and the caller stores or pastes nothing. Text,
+    // Html and Rtf flatten to their plain body (rich text loses its formatting,
+    // which is the whole point of transforming it).
+    if (item->kind == ItemKind::Image || item->kind == ItemKind::FileDrop) {
+        return false;
+    }
+    const std::vector<uint8_t> body = textconv::CanonicalBody(item->kind, item->data);
+    const std::wstring text(reinterpret_cast<const wchar_t*>(body.data()),
+                            body.size() / sizeof(wchar_t));
+    transform::Options opts;
+    opts.slugSep = cfg_.slugSep;
+    opts.dateTime = L" " + CurrentDateTimeStamp();  // leading space: "note 2026-09-14 15:30:00"
+    out = transform::Apply(kind, text, opts);
+    return true;
+}
+
+uint64_t App::CopyTransformed(uint64_t id, transform::Kind kind) {
+    std::wstring text;
+    if (!TransformItemText(id, kind, text)) {
+        return 0;
+    }
+    // A brand-new entry via Add(), never an in-place edit: the source stays as it
+    // was, and Add()'s canonical dedup surfaces an existing twin instead of storing
+    // a duplicate — the same contract MergeItems relies on.
+    const uint64_t newId = store_.Add(ItemKind::Text, Utf16Bytes(text));
+    popup::OnDataChanged();
+    ScheduleSave();
+    return newId;
+}
+
+void App::PasteTransformed(uint64_t id, transform::Kind kind) {
+    std::wstring text;
+    if (!TransformItemText(id, kind, text)) {
+        return;
+    }
+    Item out;
+    out.kind = ItemKind::Text;
+    out.data = Utf16Bytes(text);
+    // One-shot: the transformed text goes to the clipboard and out to the target
+    // window, and history is never modified. Touch() still counts this as a use of
+    // the source entry, so it moves to the front exactly like a normal paste.
+    popup::Hide();
+    if (!clip::WriteItem(hwnd_, out)) {
+        return;
+    }
+    store_.Touch(id);
+    popup::OnDataChanged();
+    ScheduleSave();
+    paste::Execute(cfg_.pasteDelayMs, cfg_.pasteKey);
+}
+
+void App::PasteAsPlainText(uint64_t id) {
+    const Item* item = store_.Find(id);
+    if (!item || item->kind == ItemKind::Image) {
+        return;
+    }
+    // The paste-time cousin of ConvertToPlainText. CanonicalBody already returns
+    // the extracted plain text as UTF-16 bytes for Html/Rtf (and the text itself
+    // for Text/FileDrop), so the flattened body drops straight into a Text item
+    // with no re-encode — and the stored entry is left exactly as it was.
+    std::vector<uint8_t> body = textconv::CanonicalBody(item->kind, item->data);
+    if (body.empty()) {
+        return;
+    }
+    Item plain;
+    plain.kind = ItemKind::Text;
+    plain.data = std::move(body);
+    popup::Hide();
+    if (!clip::WriteItem(hwnd_, plain)) {
+        return;
+    }
+    store_.Touch(id);
+    popup::OnDataChanged();
+    ScheduleSave();
+    paste::Execute(cfg_.pasteDelayMs, cfg_.pasteKey);
+}
+
+void App::AddToQueue(const std::vector<uint64_t>& ids) {
+    // Append in the given order, skipping ids already queued so re-adding a
+    // selection doesn't paste the same item twice. Stale ids are not filtered
+    // here — the pop loop in OnHotkey skips them, and an id can go stale at any
+    // time after queuing anyway.
+    for (uint64_t id : ids) {
+        if (std::find(queue_.begin(), queue_.end(), id) == queue_.end()) {
+            queue_.push_back(id);
+        }
+    }
+}
+
+int App::QueuePosition(uint64_t id) const {
+    for (size_t i = 0; i < queue_.size(); ++i) {
+        if (queue_[i] == id) {
+            return static_cast<int>(i) + 1;  // 1-based for the badge
+        }
+    }
+    return 0;
+}
+
 void App::SaveLastPos(int x, int y) {
     cfg_.lastPopupX = x;
     cfg_.lastPopupY = y;
@@ -632,8 +873,12 @@ void App::ApplyTheme() {
 
 void App::ApplyConfig() {
     ApplyTheme();
+    blockRules_ = blocklist::Parse(cfg_.blockRules);
     store_.SetLimits(cfg_.maxHistory, cfg_.expiryDays);
     i18n::Init(cfg_.language);
+    // Mask config may have changed; update it before the refresh below so the
+    // single recompute applies both the new locale and the new masking.
+    store_.SetMaskConfig(cfg_.mask);
     // Language may have changed: cached item previews (image/file localized
     // strings) must be rebuilt under the new locale.
     store_.RefreshPreviews();
@@ -651,6 +896,11 @@ void App::RegisterAllHotkeys(bool reportFailures) {
     if (cfg_.popupHotkey != 0) {
         if (!hotkeys_.Register(hotkey::kIdPopup, cfg_.popupHotkey)) {
             hotkeyFailures_ += hotkey::ToText(cfg_.popupHotkey) + L"\n";
+        }
+    }
+    if (cfg_.queueHotkey != 0) {
+        if (!hotkeys_.Register(hotkey::kIdPasteQueue, cfg_.queueHotkey)) {
+            hotkeyFailures_ += hotkey::ToText(cfg_.queueHotkey) + L"\n";
         }
     }
     for (int i = 0; i < 10; ++i) {
@@ -728,7 +978,7 @@ void App::ShowAbout() {
                     };
 
                     // About text
-                    std::wstring aboutStr = util::Format(i18n::T("about.text"), L"1.2.0");
+                    std::wstring aboutStr = util::Format(i18n::T("about.text"), L"1.3.0");
                     MkCtrl(L"STATIC", aboutStr.c_str(), SS_LEFT, 12, 10, 420, 50, -1);
 
                     // Separator
@@ -847,6 +1097,134 @@ void App::ClearHistory() {
     }
     popup::OnDataChanged();
     SaveNow();
+}
+
+void App::ExportBackup() {
+    // One-shot, user-initiated and modal: the user just picked a path and is
+    // waiting, so the write happens here rather than through AsyncWriter (which
+    // exists to keep the frequent store.dat saves off the UI thread, not to
+    // serialize arbitrary export targets). Serialize() is in-memory and fast.
+    wchar_t file[MAX_PATH] = {};
+    const std::wstring suggested = L"clipwiz-backup-" + util::TimeStampForFileName() + L".clpw";
+    wcsncpy_s(file, suggested.c_str(), _TRUNCATE);
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = kClpwFilter;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"clpw";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) {
+        return;  // cancelled
+    }
+
+    const std::vector<uint8_t> bytes = store_.Serialize();
+    if (!util::WriteFileAtomic(file, bytes.data(), bytes.size())) {
+        util::ErrorBox(hwnd_, i18n::T("msg.export_failed"));
+        return;
+    }
+    util::InfoBox(hwnd_, util::Format(i18n::T("msg.export_done"), file));
+    LOG_INFO("Exported backup: %d item(s)", store_.TotalCount());
+}
+
+void App::ImportBackup() {
+    wchar_t file[MAX_PATH] = {};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = kClpwFilter;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"clpw";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn)) {
+        return;  // cancelled
+    }
+
+    std::vector<uint8_t> bytes;
+    if (!util::ReadWholeFile(file, bytes)) {
+        util::ErrorBox(hwnd_, i18n::T("msg.import_failed"));
+        return;
+    }
+    // ImportMerge parses with the same v3 reader Load() uses and routes every
+    // entry through Add(), so a damaged or wrong-version backup returns -1 and
+    // leaves the live store byte-for-byte as it was — an import is never
+    // destructive, matching the PreserveCorrupt attitude for our own store.dat.
+    const int merged = store_.ImportMerge(bytes);
+    if (merged < 0) {
+        util::ErrorBox(hwnd_, i18n::T("msg.import_failed"));
+        return;
+    }
+    popup::OnDataChanged();
+    SaveNow();  // async, like ClearHistory
+    util::InfoBox(hwnd_, util::Format(i18n::T("msg.import_done"), merged));
+    LOG_INFO("Imported backup: %d item(s) merged", merged);
+}
+
+void App::SaveItemAs(uint64_t id) {
+    const Item* item = store_.Find(id);
+    if (item == nullptr) {
+        return;
+    }
+    // Dismiss the popup before any dialog or Explorer window opens, so focus
+    // moves cleanly to it — the same hide-then-act shape PasteTransformed uses.
+    popup::Hide();
+
+    if (item->kind == ItemKind::FileDrop) {
+        // A file list points at files that already exist on disk: there is
+        // nothing to write, so reveal them instead of offering a save dialog.
+        RevealFirstPath(hwnd_, *item);
+        return;
+    }
+
+    std::vector<uint8_t> bytes;
+    const wchar_t* filter = nullptr;
+    const wchar_t* defExt = nullptr;
+    const wchar_t* ext = nullptr;
+    if (item->kind == ItemKind::Image) {
+        // Image payloads are stored as PNG on disk (imagecodec), so the bytes go
+        // out verbatim — no re-encode, no WIC round trip.
+        bytes = item->data;
+        filter = kPngFilter;
+        defExt = L"png";
+        ext = L".png";
+    } else {
+        // Text/Html/Rtf all save their extracted plain text as UTF-8. Html and Rtf
+        // lose their formatting here by design — keeping every original byte is
+        // what the whole-history .clpw backup is for.
+        const std::string utf8 = util::Narrow(Store::TextOf(*item));
+        bytes.assign(utf8.begin(), utf8.end());
+        filter = kTxtFilter;
+        defExt = L"txt";
+        ext = L".txt";
+    }
+
+    wchar_t file[MAX_PATH] = {};
+    const std::wstring suggested = L"clipwiz-" + util::TimeStampForFileName() + ext;
+    wcsncpy_s(file, suggested.c_str(), _TRUNCATE);
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = defExt;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) {
+        return;  // cancelled
+    }
+
+    // Synchronous, like ExportBackup: a one-shot modal action the user waits on,
+    // not the frequent automatic store.dat saves AsyncWriter exists for.
+    if (!util::WriteFileAtomic(file, bytes.data(), bytes.size())) {
+        util::ErrorBox(hwnd_, i18n::T("msg.save_as_failed"));
+        return;
+    }
+    util::InfoBox(hwnd_, util::Format(i18n::T("msg.save_done"), file));
+    LOG_INFO("Saved item to %s (%zu byte(s))", util::Narrow(file).c_str(), bytes.size());
 }
 
 void App::CheckStoreSize() {

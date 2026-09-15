@@ -6,15 +6,18 @@
 #include <windowsx.h>
 
 #include <algorithm>
-#include <cwctype>
 #include <string>
 #include <vector>
 
+#include "filter.h"
 #include "hotkey.h"
 #include "i18n.h"
 #include "imagecodec.h"
+#include "mask.h"
+#include "merge.h"
 #include "paste.h"
 #include "resource.h"
+#include "transform.h"
 
 namespace popup {
 namespace {
@@ -60,6 +63,7 @@ struct State {
     int fontMainH = 0;
     int fontSmallH = 0;
     int sortBtnsW = 0;  // Width for 4 pinned-item sort icons at row end
+    int queueW = 0;     // Reserved strip for the paste-queue position badge (queued rows only)
 
     // Interaction state
     bool closeHover = false;  // Mouse hovering X button
@@ -70,7 +74,21 @@ struct State {
 
     std::vector<Row> rows;
     int sel = -1;
+    // Multi-selection. Empty in the common case, when `sel` alone is the whole
+    // selection and every path behaves exactly as it did before this existed —
+    // the "type, Enter, paste" main flow never touches these two fields. Ctrl/
+    // Shift interactions populate selIds (a sorted, unique set of item ids,
+    // chosen over row indices so it survives a filter rebuild) and move
+    // selAnchorId, the fixed end of a Shift-range.
+    std::vector<uint64_t> selIds;
+    uint64_t selAnchorId = 0;
     int top = 0;
+    // True when rows was narrowed by a non-empty filter. Set by Rebuild() so
+    // painting reads the same verdict the list was built with, instead of
+    // re-reading the edit box and risking a different answer. Drives which
+    // empty-state message shows: "no history yet" and "nothing matched" are
+    // two different situations and only one of them is a dead end.
+    bool filtered = false;
     int modalDepth = 0;
     bool hideRestoreFocus = true;  // Whether Hide() should restore focus to previous window
 
@@ -87,11 +105,12 @@ struct State {
     int reorderFrom = -1;
     int reorderInsert = -1;
 
-    // Ctrl+hover preview
+    // Hover preview (plain hover after a delay, Ctrl+hover immediately)
     HWND previewWnd = nullptr;
     HWND previewEdit = nullptr;   // RichEdit child for RTF preview
     HMODULE richeditDll = nullptr;
-    int previewRow = -1;
+    int previewRow = -1;          // Row whose preview is on screen, -1 = none
+    int previewPendingRow = -1;   // Row the running timer will show, -1 = no timer
     UINT_PTR previewTimer = 0;
 };
 
@@ -122,6 +141,122 @@ static inline bool IsSortBtnEnabled(int pinnedIdx, int pinnedCount, int btn) {
         case 3: return pinnedIdx < pinnedCount - 1;   // to bottom
     }
     return false;
+}
+
+// ---------------- Multi-selection helpers ----------------
+//
+// The selected set (g.selIds) is empty unless the user holds Ctrl/Shift or
+// presses Ctrl+A. When it is empty, g.sel is the whole selection and nothing
+// below adds work to the paint or input paths beyond a single empty-vector
+// check, so the single-selection behaviour — and its cost — is unchanged.
+
+int RowIndexOfId(uint64_t id) {
+    for (int i = 0; i < static_cast<int>(g.rows.size()); ++i) {
+        if (g.rows[static_cast<size_t>(i)].id == id) return i;
+    }
+    return -1;
+}
+
+// A row shows selected if it is the cursor/anchor (g.sel) or, when a
+// multi-selection is active, a member of it.
+bool IsRowSelected(int index) {
+    if (index == g.sel) return true;
+    if (g.selIds.empty()) return false;  // common case: nothing else selected
+    if (index < 0 || static_cast<size_t>(index) >= g.rows.size()) return false;
+    const uint64_t id = g.rows[static_cast<size_t>(index)].id;
+    return std::binary_search(g.selIds.begin(), g.selIds.end(), id);
+}
+
+void ClearMultiSel() {
+    g.selIds.clear();
+}
+
+void SetAnchorToSel() {
+    g.selAnchorId = (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size())
+                        ? g.rows[static_cast<size_t>(g.sel)].id
+                        : 0;
+}
+
+// Select every row between a and b (either order), by id, sorted and unique.
+void SelectRange(int a, int b) {
+    g.selIds.clear();
+    if (a < 0 || b < 0 || g.rows.empty()) return;
+    const int lo = std::min(a, b);
+    const int hi = std::min(std::max(a, b), static_cast<int>(g.rows.size()) - 1);
+    for (int i = lo; i <= hi; ++i) {
+        g.selIds.push_back(g.rows[static_cast<size_t>(i)].id);
+    }
+    std::sort(g.selIds.begin(), g.selIds.end());
+    g.selIds.erase(std::unique(g.selIds.begin(), g.selIds.end()), g.selIds.end());
+}
+
+// Extend the selection from the anchor to `focusIdx` (Shift+Arrow / Shift+click).
+void ExtendSelTo(int focusIdx) {
+    int anchorIdx = RowIndexOfId(g.selAnchorId);
+    if (anchorIdx < 0) anchorIdx = focusIdx;  // no live anchor: a range of one
+    SelectRange(anchorIdx, focusIdx);
+}
+
+void ToggleSelectId(uint64_t id) {
+    auto it = std::lower_bound(g.selIds.begin(), g.selIds.end(), id);
+    if (it != g.selIds.end() && *it == id) {
+        g.selIds.erase(it);
+    } else {
+        g.selIds.insert(it, id);
+    }
+}
+
+void SelectAllRows() {
+    g.selIds.clear();
+    g.selIds.reserve(g.rows.size());
+    for (const Row& r : g.rows) g.selIds.push_back(r.id);
+    std::sort(g.selIds.begin(), g.selIds.end());
+    g.selIds.erase(std::unique(g.selIds.begin(), g.selIds.end()), g.selIds.end());
+}
+
+// Drop selected ids no longer present (filtered out or deleted). Runs after
+// Rebuild refills g.rows; a no-op in the common empty case.
+void PruneMultiSel() {
+    if (g.selIds.empty()) return;
+    std::vector<uint64_t> present;
+    present.reserve(g.rows.size());
+    for (const Row& r : g.rows) present.push_back(r.id);
+    std::sort(present.begin(), present.end());
+    std::vector<uint64_t> kept;
+    kept.reserve(g.selIds.size());
+    for (uint64_t id : g.selIds) {
+        if (std::binary_search(present.begin(), present.end(), id)) kept.push_back(id);
+    }
+    g.selIds.swap(kept);
+    if (g.selAnchorId != 0 && RowIndexOfId(g.selAnchorId) < 0) {
+        SetAnchorToSel();
+    }
+}
+
+// The ids a whole-selection action (merge) applies to when the user right-clicks
+// row `index`. If an active multi-selection contains that row, the action covers
+// the entire selection, walked top-to-bottom so a merge reads in the on-screen
+// order rather than id order. Otherwise it is just the clicked row, and the
+// caller's CanMerge check greys the menu item out for want of a second entry.
+std::vector<uint64_t> EffectiveSelection(int index) {
+    std::vector<uint64_t> ids;
+    if (index < 0 || static_cast<size_t>(index) >= g.rows.size()) {
+        return ids;
+    }
+    const uint64_t rowId = g.rows[static_cast<size_t>(index)].id;
+    const bool inMulti =
+        !g.selIds.empty() &&
+        std::binary_search(g.selIds.begin(), g.selIds.end(), rowId);
+    if (inMulti) {
+        for (const Row& r : g.rows) {
+            if (std::binary_search(g.selIds.begin(), g.selIds.end(), r.id)) {
+                ids.push_back(r.id);
+            }
+        }
+    } else {
+        ids.push_back(rowId);
+    }
+    return ids;
 }
 
 // ---------------- Metrics ----------------
@@ -207,6 +342,10 @@ void CalcMetrics() {
     int btnGap = util::Scale(2, g.dpi);
     int btnMargin = util::Scale(3, g.dpi);
     g.sortBtnsW = btnSize * 4 + btnGap * 3 + btnMargin * 2;
+    // Badge strip for the paste-queue position: room for two digits plus the
+    // pill padding DrawRow draws around them.
+    g.queueW = std::max(util::Scale(24, g.dpi),
+                        MeasureTextWidth(g.fontSmall, L"99") + util::Scale(12, g.dpi));
 
     int minTextW = std::max({util::Scale(240, g.dpi), titleTextW + util::Scale(36, g.dpi),
                              hintTextW + util::Scale(20, g.dpi), filterHintW + util::Scale(20, g.dpi)});
@@ -303,22 +442,29 @@ const Thumb* GetThumb(uint64_t id) {
 // ---------------- Rebuild list ----------------
 
 void UpdateScrollbar();  // forward declaration
+void HidePreview();      // forward declaration
 
 void Rebuild() {
-    std::wstring filter;
+    // The preview is keyed on a row index, and this is about to change what
+    // every index means. Drop it first: leaving it up would show one item's
+    // content beside a row that now holds another.
+    HidePreview();
+
+    std::wstring rawFilter;
     if (g.edit) {
         int len = GetWindowTextLengthW(g.edit);
         if (len > 0) {
             std::wstring buf(static_cast<size_t>(len) + 1, L'\0');
             GetWindowTextW(g.edit, buf.data(), len + 1);
             buf.resize(static_cast<size_t>(len));
-            filter = buf;
+            rawFilter = buf;
         }
     }
-    // Convert to lowercase
-    for (wchar_t& c : filter) {
-        c = static_cast<wchar_t>(towlower(c));
-    }
+    // Parse once per keystroke, not once per item: tokenizing and lowercasing
+    // the query is O(typed length), and the per-item cost below is then a
+    // plain substring search with no allocation.
+    const filter::Query query = filter::Parse(rawFilter);
+    g.filtered = !query.Empty();
 
     uint64_t oldSelId = 0;
     if (g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size()) {
@@ -327,14 +473,13 @@ void Rebuild() {
 
     g.rows.clear();
     for (const Item& item : g.host->GetStore().Items()) {
-        if (!filter.empty()) {
-            std::wstring lower = item.preview;
-            for (wchar_t& c : lower) {
-                c = static_cast<wchar_t>(towlower(c));
-            }
-            if (lower.find(filter) == std::wstring::npos) {
-                continue;
-            }
+        // Matches against item.searchText — the full content — rather than
+        // item.preview, which is a 160-char one-line summary. Searching used
+        // to go blind past that cut, and for file lists it only ever saw the
+        // first path out of N.
+        if (!query.Empty() &&
+            !filter::Matches(query, item.kind, item.searchText, item.sourceApp)) {
+            continue;
         }
         g.rows.push_back({item.id, item.pinned});
     }
@@ -348,6 +493,14 @@ void Rebuild() {
     }
     if (g.sel < 0 && !g.rows.empty()) {
         g.sel = 0;
+    }
+    PruneMultiSel();
+    // With no active multi-selection the anchor is simply the current row; keep
+    // it in sync so a later Shift+Arrow or Shift+click extends from here. This
+    // is O(1) and runs only when there is no multi-selection to preserve, so the
+    // per-keystroke filter path is not made any slower.
+    if (g.selIds.empty() && g.sel >= 0 && static_cast<size_t>(g.sel) < g.rows.size()) {
+        g.selAnchorId = g.rows[static_cast<size_t>(g.sel)].id;
     }
     g.top = 0;
     if (g.sel >= 0) {
@@ -474,7 +627,7 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     if (!item) {
         return;
     }
-    const bool selected = index == g.sel;
+    const bool selected = IsRowSelected(index);
     const bool dark = theme.bg < RGB(128, 128, 128);
 
     // Hard-coded pinned-row background per theme, kept in lockstep with
@@ -570,10 +723,96 @@ void DrawRow(HDC dc, const RECT& rc, int index, const util::Theme& theme) {
     // (Type is now shown by the per-row type icon in the leading strip, so no
     // more inline "RTF"/"HTML" text badge here.)
 
+    // Paste-queue badge: reserve a strip at the row's right edge for the item's
+    // 1-based queue position. Only queued rows give up the space, so the common
+    // empty-queue case keeps full text width. This runs after the pinned
+    // sortBtnsW trim and before the source-app slot, so the tail reads
+    // [text][app][badge][sort icons] with no overlap. The pill itself is painted
+    // at the end of the row so it sits on top of the reserved strip.
+    const int queuePos = g.host->QueuePosition(row.id);
+    RECT queueRc = {0, 0, 0, 0};
+    if (queuePos > 0) {
+        queueRc = textRc;
+        queueRc.left = queueRc.right - g.queueW;
+        textRc.right = queueRc.left - G;
+    }
+
+    // Source app, right-aligned in a slot of its own at the tail of the row.
+    // The preview rect is narrowed to make room, so long content truncates
+    // against the label instead of running underneath it.
+    std::wstring appLabel;
+    RECT appRc = {0, 0, 0, 0};
+    if (!item->sourceApp.empty()) {
+        appLabel = item->sourceApp;
+        // ".exe" is universal on Windows and says nothing here; dropping it buys
+        // back four characters of preview on every row.
+        const size_t kExeLen = 4;
+        if (appLabel.size() > kExeLen &&
+            appLabel.compare(appLabel.size() - kExeLen, kExeLen, L".exe") == 0) {
+            appLabel.resize(appLabel.size() - kExeLen);
+        }
+        SelectObject(dc, g.fontSmall);
+        SIZE sz = {};
+        GetTextExtentPoint32W(dc, appLabel.c_str(), static_cast<int>(appLabel.size()), &sz);
+        const int slotW = sz.cx + G;
+        // Capped at half the row: an unusually long process name must not
+        // squeeze out the content the user is actually scanning for.
+        if (slotW > 0 && slotW * 2 < textRc.right - textRc.left) {
+            appRc = textRc;
+            appRc.left = appRc.right - slotW;
+            textRc.right = appRc.left;
+        } else {
+            appLabel.clear();  // No room — show the content, drop the metadata.
+        }
+    }
+
     SelectObject(dc, g.font);
     SetTextColor(dc, selected ? theme.selFg : theme.fg);
     DrawTextW(dc, item->preview.c_str(), -1, &textRc,
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (!appLabel.empty()) {
+        SelectObject(dc, g.fontSmall);
+        // Same colour rule as the index label: quiet on ordinary rows, legible
+        // on the selected one.
+        SetTextColor(dc, selected ? theme.selFg : theme.dim);
+        DrawTextW(dc, appLabel.c_str(), -1, &appRc,
+                  DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+    }
+
+    // Paint the queue badge on top of the strip reserved above: an accent pill
+    // with the position number, vertically centered, right-aligned in queueRc.
+    if (queuePos > 0) {
+        SelectObject(dc, g.fontSmall);
+        const std::wstring qtext = util::Format(L"%d", queuePos);
+        SIZE qsz = {};
+        GetTextExtentPoint32W(dc, qtext.c_str(), static_cast<int>(qtext.size()), &qsz);
+        const int pillPad = util::Scale(4, g.dpi);
+        int pillH = qsz.cy + pillPad;
+        const int pillCap = g.rowH - util::Scale(6, g.dpi);
+        if (pillH > pillCap) pillH = pillCap;
+        int pillW = qsz.cx + pillPad * 2;
+        if (pillW > queueRc.right - queueRc.left) pillW = queueRc.right - queueRc.left;
+        const int pillTop = rc.top + (g.rowH - pillH) / 2;
+        RECT pill = {queueRc.right - pillW, pillTop, queueRc.right, pillTop + pillH};
+        // Accent-filled rounded rect; the number is drawn in whichever of
+        // near-white / near-black contrasts with the accent's luminance.
+        HPEN qpen = CreatePen(PS_SOLID, std::max(1, util::Scale(1, g.dpi)), theme.accent);
+        HBRUSH qbrush = CreateSolidBrush(theme.accent);
+        HGDIOBJ oldQPen = SelectObject(dc, qpen);
+        HGDIOBJ oldQBrush = SelectObject(dc, qbrush);
+        const int rad = util::Scale(3, g.dpi);
+        RoundRect(dc, pill.left, pill.top, pill.right, pill.bottom, rad, rad);
+        SelectObject(dc, oldQPen);
+        SelectObject(dc, oldQBrush);
+        DeleteObject(qpen);
+        DeleteObject(qbrush);
+        const int lum = (GetRValue(theme.accent) * 299 + GetGValue(theme.accent) * 587 +
+                         GetBValue(theme.accent) * 114) / 1000;
+        SetTextColor(dc, lum < 128 ? RGB(0xff, 0xff, 0xff) : RGB(0x10, 0x10, 0x10));
+        DrawTextW(dc, qtext.c_str(), -1, &pill,
+                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+    }
 }
 
 // Helpers for hit-testing
@@ -834,7 +1073,10 @@ void PaintAll(HDC target, const RECT& client) {
         RECT emptyRc = list;
         SelectObject(mem, g.font);
         SetTextColor(mem, theme.dim);
-        const wchar_t* msg = i18n::T("popup.empty");
+        // Two different situations, two different messages. Telling a user who
+        // typed a search that they have "no clipboard history yet" is not just
+        // unhelpful, it is wrong — the history is right there, filtered out.
+        const wchar_t* msg = i18n::T(g.filtered ? "popup.empty_filtered" : "popup.empty");
         DrawTextW(mem, msg, -1, &emptyRc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
 
@@ -860,6 +1102,16 @@ void PaintAll(HDC target, const RECT& client) {
 }
 
 // ---------------- Preview tooltip window ----------------
+
+// The preview window is a plain popup with no dialog resource, so its timer id
+// is just a number agreed on between WM_MOUSEMOVE and WM_TIMER. Named here
+// because the two ends have to keep matching.
+constexpr UINT_PTR kPreviewTimerId = 2;
+
+// How long the mouse must rest on a row before its preview appears. Long
+// enough that sweeping down the list does not flash a window per row, short
+// enough that it still feels like hovering rather than waiting. Ctrl skips it.
+constexpr UINT kPreviewDelayMs = 300;
 
 // Stream callback for feeding RTF data into RichEdit
 struct RtfStreamData {
@@ -894,6 +1146,7 @@ void HidePreview() {
         g.previewWnd = nullptr;
     }
     g.previewRow = -1;
+    g.previewPendingRow = -1;
     if (g.previewTimer) {
         KillTimer(g.hwnd, g.previewTimer);
         g.previewTimer = 0;
@@ -948,8 +1201,21 @@ void ShowPreview(int rowIndex) {
     }
     ShowWindow(g.previewWnd, SW_SHOWNA);
 
-    // RTF: render natively via RichEdit control (shows text + images + formatting)
+    // RTF: render natively via RichEdit (text + images + formatting). Masking
+    // can't rewrite a raw RTF stream in place, so when it's active and would
+    // change this item's text we skip the rich render and fall through to the
+    // GDI path below, which draws the masked plain text — this one preview loses
+    // rich formatting, the right trade for not leaking the secret. With masking
+    // off, rtfMasked stays false and the rich path runs exactly as before.
+    bool rtfMasked = false;
     if (item->kind == ItemKind::Rtf) {
+        const mask::Config& mc = g.host->MaskConfig();
+        if (mask::AnyEnabled(mc)) {
+            const std::wstring plain = Store::TextOf(*item);
+            rtfMasked = (mask::Apply(plain, mc) != plain);
+        }
+    }
+    if (item->kind == ItemKind::Rtf && !rtfMasked) {
         if (!g.richeditDll) {
             g.richeditDll = LoadLibraryW(L"Msftedit.dll");
             if (!g.richeditDll) {
@@ -1014,8 +1280,9 @@ void ShowPreview(int rowIndex) {
             DeleteObject(big);
         }
     } else {
-        // Text types: show full content
-        std::wstring text = Store::TextOf(*item);
+        // Text types: show full content, masked so the hover view reveals no
+        // more than the (already masked) list row does.
+        std::wstring text = mask::Apply(Store::TextOf(*item), g.host->MaskConfig());
         SelectObject(dc, g.font);
         SetTextColor(dc, theme.fg);
         RECT textRc = {6, 6, pw - 6, ph - 6};
@@ -1034,9 +1301,22 @@ void Activate(int index) {
     g.host->PasteItem(g.rows[static_cast<size_t>(index)].id);
 }
 
-bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
+bool HandleNavKey(UINT vk, bool ctrl, bool alt, bool shift) {
     if (alt && vk >= '1' && vk <= '9') {
         Activate(static_cast<int>(vk - '1'));
+        return true;
+    }
+    if (ctrl && vk == 'A') {
+        // Ctrl+A selects every row. It belongs to the list here, not the filter
+        // box, so EditProc forwards it before the edit control can eat it.
+        SelectAllRows();
+        if (!g.rows.empty()) {
+            g.sel = 0;
+            g.selAnchorId = g.rows[0].id;
+            EnsureVisible();
+            UpdateScrollbar();
+        }
+        Redraw(false);
         return true;
     }
     if (ctrl && (vk == VK_UP || vk == VK_DOWN)) {
@@ -1087,30 +1367,61 @@ bool HandleNavKey(UINT vk, bool ctrl, bool alt) {
     }
     int vis = g.host->RowsVisible();
     int count = static_cast<int>(g.rows.size());
+    // Shift+Arrow extends the selection from the anchor; a plain arrow moves the
+    // cursor and drops any multi-selection. Ctrl+Arrow never reaches here — the
+    // pinned-reorder branch above handles it and returns first.
     if (vk == VK_UP) {
-        if (g.sel > 0) { --g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(false); }
+        if (g.sel > 0) {
+            --g.sel;
+            if (shift) ExtendSelTo(g.sel);
+            else { SetAnchorToSel(); ClearMultiSel(); }
+            EnsureVisible(); UpdateScrollbar(); Redraw(false);
+        }
         return true;
     }
     if (vk == VK_DOWN) {
-        if (g.sel < count - 1) { ++g.sel; EnsureVisible(); UpdateScrollbar(); Redraw(false); }
+        if (g.sel < count - 1) {
+            ++g.sel;
+            if (shift) ExtendSelTo(g.sel);
+            else { SetAnchorToSel(); ClearMultiSel(); }
+            EnsureVisible(); UpdateScrollbar(); Redraw(false);
+        }
         return true;
     }
     if (vk == VK_PRIOR) {
-        g.sel = std::max(0, g.sel - vis); EnsureVisible(); UpdateScrollbar(); Redraw(false);
+        g.sel = std::max(0, g.sel - vis); SetAnchorToSel(); ClearMultiSel();
+        EnsureVisible(); UpdateScrollbar(); Redraw(false);
         return true;
     }
     if (vk == VK_NEXT) {
-        g.sel = std::min(count - 1, g.sel + vis); EnsureVisible(); UpdateScrollbar(); Redraw(false);
+        g.sel = std::min(count - 1, g.sel + vis); SetAnchorToSel(); ClearMultiSel();
+        EnsureVisible(); UpdateScrollbar(); Redraw(false);
         return true;
     }
     if (ctrl && vk == VK_HOME) {
-        g.sel = 0; EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
+        g.sel = 0; SetAnchorToSel(); ClearMultiSel();
+        EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
     }
     if (ctrl && vk == VK_END) {
-        g.sel = count - 1; EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
+        g.sel = count - 1; SetAnchorToSel(); ClearMultiSel();
+        EnsureVisible(); UpdateScrollbar(); Redraw(false); return true;
     }
     return false;
 }
+
+// One i18n key per transform, indexed by transform::Kind. Declared beside the
+// menu that consumes it so the order visibly tracks the enum; the static_assert
+// fails the build if the two ever drift apart.
+const char* const kTransformKeys[] = {
+    "transform.trim",       "transform.remove_line_breaks", "transform.one_line",
+    "transform.two_lines",  "transform.upper",              "transform.lower",
+    "transform.capitalize", "transform.sentence",           "transform.camel",
+    "transform.invert",     "transform.ascii",              "transform.slugify",
+    "transform.datetime",
+};
+static_assert(sizeof(kTransformKeys) / sizeof(kTransformKeys[0]) ==
+                  static_cast<size_t>(transform::kKindCount),
+              "kTransformKeys must have exactly one entry per transform::Kind");
 
 void ShowRowMenu(int index) {
     if (index < 0 || static_cast<size_t>(index) >= g.rows.size()) {
@@ -1123,11 +1434,61 @@ void ShowRowMenu(int index) {
     // Rich-text items (RTF or HTML) carry formatting and can be flattened to
     // plain text. These are exactly the rows drawn with the "RTF" badge.
     const bool isRich = item && (item->kind == ItemKind::Rtf || item->kind == ItemKind::Html);
+    // Merge acts on the whole selection when the right-clicked row is part of an
+    // active multi-selection, else on this row alone (which CanMerge rejects for
+    // want of a second item, so the entry greys out). Computed once here; the id
+    // list is reused by the command handler below.
+    const std::vector<uint64_t> mergeIds = EffectiveSelection(index);
+    std::vector<const Item*> mergeItems;
+    mergeItems.reserve(mergeIds.size());
+    for (uint64_t mid : mergeIds) {
+        if (const Item* mi = g.host->GetStore().Find(mid)) {
+            mergeItems.push_back(mi);
+        }
+    }
+    const bool canMerge = merge::CanMerge(mergeItems);
+    // Transforms read prose, so their submenus light up only for text-bearing rows
+    // (Text/Html/Rtf). An image or a file list has nothing to case-fold or trim,
+    // so both submenus grey out for those.
+    const bool isText = item && (item->kind == ItemKind::Text || item->kind == ItemKind::Html ||
+                                 item->kind == ItemKind::Rtf);
+
+    // Two transform submenus, 13 leaves each: "Copy transformed" stores the result
+    // as a new entry, "Paste transformed" sends it out once without touching
+    // history. Leaf ids are 100+Kind and 200+Kind, so the switch recovers the Kind
+    // by subtracting the base. Both are attached to `menu`, so the single
+    // DestroyMenu below reclaims them too.
+    HMENU copySub = CreatePopupMenu();
+    HMENU pasteSub = CreatePopupMenu();
+    for (int k = 0; k < transform::kKindCount; ++k) {
+        AppendMenuW(copySub, MF_STRING, 100 + k, i18n::T(kTransformKeys[k]));
+        AppendMenuW(pasteSub, MF_STRING, 200 + k, i18n::T(kTransformKeys[k]));
+    }
+
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, i18n::T("popup.menu.copy"));
     AppendMenuW(menu, MF_STRING, 2, i18n::T("popup.menu.paste"));
+    AppendMenuW(menu, MF_STRING | (isRich ? MF_ENABLED : MF_GRAYED), 7,
+                i18n::T("popup.menu.paste_plain"));
     AppendMenuW(menu, MF_STRING | (isRich ? MF_ENABLED : MF_GRAYED), 5,
                 i18n::T("popup.menu.to_plain"));
+    AppendMenuW(menu, MF_STRING | (canMerge ? MF_ENABLED : MF_GRAYED), 6,
+                i18n::T("popup.menu.merge"));
+    // Add the selection to the sequential paste queue. Always enabled: any item
+    // kind can be queued and pasted in turn, and a lone row is a valid queue.
+    AppendMenuW(menu, MF_STRING, 8, i18n::T("popup.menu.add_queue"));
+    // Save this row out to a real file. A file list has nothing to write (its
+    // files already exist on disk), so its entry reads "Show in Explorer" and
+    // reveals them instead; every other kind offers a save dialog. Always
+    // enabled — all five kinds have a sensible action.
+    const bool isFileDrop = item && item->kind == ItemKind::FileDrop;
+    AppendMenuW(menu, MF_STRING, 9,
+                isFileDrop ? i18n::T("popup.menu.reveal") : i18n::T("popup.menu.save_as"));
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_POPUP | (isText ? MF_ENABLED : MF_GRAYED),
+                reinterpret_cast<UINT_PTR>(copySub), i18n::T("popup.menu.copy_transformed"));
+    AppendMenuW(menu, MF_POPUP | (isText ? MF_ENABLED : MF_GRAYED),
+                reinterpret_cast<UINT_PTR>(pasteSub), i18n::T("popup.menu.paste_transformed"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 3,
                 row.pinned ? i18n::T("popup.menu.unpin") : i18n::T("popup.menu.pin"));
@@ -1185,7 +1546,78 @@ void ShowRowMenu(int index) {
             }
             break;
         }
-        default: break;
+        case 6: {
+            // MergeItems triggers OnDataChanged -> Rebuild, so g.rows is fresh by
+            // the time it returns; select the merged result in the new list and
+            // drop the multi-selection that fed it (those rows are now one entry).
+            const uint64_t mergedId = g.host->MergeItems(mergeIds);
+            if (mergedId != 0) {
+                ClearMultiSel();
+                g.sel = -1;
+                for (size_t i = 0; i < g.rows.size(); ++i) {
+                    if (g.rows[i].id == mergedId) {
+                        g.sel = static_cast<int>(i);
+                        break;
+                    }
+                }
+                if (g.sel < 0 && !g.rows.empty()) g.sel = 0;
+                SetAnchorToSel();
+                EnsureVisible();
+                UpdateScrollbar();
+                Redraw(false);
+            }
+            break;
+        }
+        case 7: {
+            const Item* it = g.host->GetStore().Find(rowId);
+            if (it && (it->kind == ItemKind::Rtf || it->kind == ItemKind::Html)) {
+                // Flatten and paste in one shot; the stored entry is not modified.
+                g.host->PasteAsPlainText(rowId);
+            }
+            break;
+        }
+        case 8: {
+            // Queue the selection for sequential pasting. The multi-selection is
+            // kept so the badges that just appeared stay lined up with the rows
+            // the user picked; a plain repaint picks up the new positions.
+            g.host->AddToQueue(mergeIds);
+            Redraw(false);
+            break;
+        }
+        case 9:
+            // Save-as / reveal. App hides the popup and opens a modal dialog or
+            // Explorer, so there is nothing to redraw here (mirrors case 2).
+            g.host->SaveItemAs(rowId);
+            break;
+        default:
+            // Transform submenu leaves: 100+Kind copies to a new entry, 200+Kind
+            // pastes once. Recover the Kind by subtracting the base offset.
+            if (cmd >= 100 && cmd < 100 + transform::kKindCount) {
+                const uint64_t newId =
+                    g.host->CopyTransformed(rowId, static_cast<transform::Kind>(cmd - 100));
+                if (newId != 0) {
+                    // OnDataChanged inside App already rebuilt g.rows, so the new
+                    // entry is findable in the fresh list; select it and drop any
+                    // stale multi-selection, exactly like the merge handler.
+                    ClearMultiSel();
+                    g.sel = -1;
+                    for (size_t i = 0; i < g.rows.size(); ++i) {
+                        if (g.rows[i].id == newId) {
+                            g.sel = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    if (g.sel < 0 && !g.rows.empty()) g.sel = 0;
+                    SetAnchorToSel();
+                    EnsureVisible();
+                    UpdateScrollbar();
+                    Redraw(false);
+                }
+            } else if (cmd >= 200 && cmd < 200 + transform::kKindCount) {
+                // App hides the popup and pastes, so there is nothing to redraw.
+                g.host->PasteTransformed(rowId, static_cast<transform::Kind>(cmd - 200));
+            }
+            break;
     }
 }
 
@@ -1249,12 +1681,16 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             UINT vk = static_cast<UINT>(wparam);
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            // Up/Down are forwarded whatever the modifiers, so Shift+Arrow reaches
+            // HandleNavKey to extend the selection; Ctrl+A is added so the list,
+            // not the filter box, owns select-all.
             if (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT ||
                 vk == VK_RETURN || vk == VK_ESCAPE ||
                 (alt && vk >= '1' && vk <= '9') ||
-                (ctrl && (vk == 'P' || vk == 'D' || vk == VK_DELETE || vk == VK_HOME ||
-                          vk == VK_END || vk == VK_UP || vk == VK_DOWN))) {
-                if (HandleNavKey(vk, ctrl, alt)) {
+                (ctrl && (vk == 'A' || vk == 'P' || vk == 'D' || vk == VK_DELETE ||
+                          vk == VK_HOME || vk == VK_END || vk == VK_UP || vk == VK_DOWN))) {
+                if (HandleNavKey(vk, ctrl, alt, shift)) {
                     return 0;
                 }
             }
@@ -1417,18 +1853,35 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         Redraw(false);
                         return 0;
                     }
-                    g.sel = idx;
-                    Redraw(false);
-                    // Start drag reorder in pinned area (disabled when filter is
-                    // active because filtered row indices don't map 1:1 to the
-                    // full pinned order that MovePinnedTo expects).
-                    if (g.rows[static_cast<size_t>(idx)].pinned &&
-                        !(g.edit && GetWindowTextLengthW(g.edit) > 0)) {
-                        g.reorderDrag = true;
-                        g.reorderFrom = idx;
-                        g.reorderInsert = idx;
-                        SetCapture(hwnd);
+                    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    const uint64_t clickedId = g.rows[static_cast<size_t>(idx)].id;
+                    if (ctrlDown) {
+                        // Ctrl+click toggles this row in/out of the multi-selection
+                        // and makes it the new anchor. No drag-reorder on Ctrl.
+                        ToggleSelectId(clickedId);
+                        g.sel = idx;
+                        g.selAnchorId = clickedId;
+                    } else if (shiftDown) {
+                        // Shift+click extends the selection from the anchor to here.
+                        g.sel = idx;
+                        ExtendSelTo(idx);
+                    } else {
+                        g.sel = idx;
+                        g.selAnchorId = clickedId;
+                        ClearMultiSel();
+                        // Start drag reorder in pinned area (disabled when filter is
+                        // active because filtered row indices don't map 1:1 to the
+                        // full pinned order that MovePinnedTo expects).
+                        if (g.rows[static_cast<size_t>(idx)].pinned &&
+                            !(g.edit && GetWindowTextLengthW(g.edit) > 0)) {
+                            g.reorderDrag = true;
+                            g.reorderFrom = idx;
+                            g.reorderInsert = idx;
+                            SetCapture(hwnd);
+                        }
                     }
+                    Redraw(false);
                 }
             }
             return 0;
@@ -1492,30 +1945,47 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 Redraw(false);
                 return 0;
             }
-            // Ctrl+hover preview
-            if (GetKeyState(VK_CONTROL) & 0x8000) {
+            // Hover preview.
+            //
+            // Two things decide whether a row is worth previewing: which row
+            // the mouse is over, and whether Ctrl is down. Only a CHANGE in the
+            // row restarts anything — re-arming the timer on every WM_MOUSEMOVE
+            // would mean the preview never appears while the hand is moving,
+            // however slightly, which is most of the time.
+            const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            int hoverIdx = -1;
+            if (ctrlDown || g.host->HoverPreview()) {
                 RECT list = ListRect();
-                int x = mx;
-                int y = my;
-                if (x >= list.left && x < list.right && y >= list.top && y < list.bottom) {
-                    int idx = g.top + (y - list.top) / g.rowH;
-                    if (idx != g.previewRow && idx >= 0 &&
-                        static_cast<size_t>(idx) < g.rows.size()) {
-                        HidePreview();
-                        g.previewTimer = SetTimer(hwnd, 2, 300, nullptr);
-                        g.previewRow = -2;
-                        SetPropW(hwnd, L"PreviewIdx", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(idx)));
+                if (mx >= list.left && mx < list.right && my >= list.top && my < list.bottom) {
+                    int idx = g.top + (my - list.top) / g.rowH;
+                    if (idx >= 0 && static_cast<size_t>(idx) < g.rows.size()) {
+                        hoverIdx = idx;
                     }
-                } else {
-                    HidePreview();
                 }
-            } else {
+            }
+            if (hoverIdx != g.previewPendingRow) {
                 HidePreview();
+                g.previewPendingRow = hoverIdx;
+                if (hoverIdx >= 0) {
+                    if (ctrlDown) {
+                        // Ctrl is the deliberate "show me this one now" gesture,
+                        // and it keeps working with hover preview switched off —
+                        // that is the escape hatch for people who find the popup
+                        // appearing uninvited while they read the list.
+                        ShowPreview(hoverIdx);
+                    } else {
+                        g.previewTimer = SetTimer(hwnd, kPreviewTimerId, kPreviewDelayMs, nullptr);
+                    }
+                }
             }
             return 0;
         }
         case WM_MOUSELEAVE: {
             g.mouseTracking = false;
+            // Without this a pending preview still fires after the cursor has
+            // left the popup: no further WM_MOUSEMOVE arrives to cancel it, so
+            // the window would pop up beside a row nothing is pointing at.
+            HidePreview();
             if (g.closeHover || g.hoverRow >= 0 || g.hoverSortBtn >= 0) {
                 bool needFull = g.closeHover;
                 g.closeHover = false;
@@ -1623,14 +2093,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_TIMER:
-            if (wparam == 2) {
-                KillTimer(hwnd, 2);
+            if (wparam == kPreviewTimerId) {
+                KillTimer(hwnd, kPreviewTimerId);
                 g.previewTimer = 0;
-                HANDLE prop = GetPropW(hwnd, L"PreviewIdx");
-                if (prop) {
-                    int idx = static_cast<int>(reinterpret_cast<INT_PTR>(prop));
-                    RemovePropW(hwnd, L"PreviewIdx");
-                    ShowPreview(idx);
+                if (g.previewPendingRow >= 0) {
+                    ShowPreview(g.previewPendingRow);
                 }
             }
             return 0;
@@ -1757,6 +2224,11 @@ void Show() {
         ReleaseCapture();
     }
     HidePreview();
+
+    // A fresh Show is a fresh session: drop any multi-selection left over from
+    // the previous one so it cannot reappear highlighted (and be merged) by
+    // accident. Rebuild() below then restores the single cursor row by id.
+    ClearMultiSel();
 
     Rebuild();
     UpdateScrollbar();

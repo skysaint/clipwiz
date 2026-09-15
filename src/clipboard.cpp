@@ -5,9 +5,11 @@
 #include <shlobj.h>
 
 #include <cstring>
+#include <cwctype>
 
 #include "imagecodec.h"
 #include "log.h"
+#include "privacy.h"
 #include "raii.h"
 #include "util.h"
 
@@ -20,8 +22,8 @@ UINT g_fmtRtf = 0;
 UINT g_fmtRtfNoObj = 0;
 UINT g_fmtHtml = 0;
 UINT g_fmtPng = 0;
-UINT g_fmtIgnore1 = 0;
-UINT g_fmtIgnore2 = 0;
+// Registered format ids of the exclusion markers, parallel to privacy::kMarkers.
+UINT g_fmtMarker[privacy::kMarkerCount] = {};
 
 void EnsureFormats() {
     if (g_fmtRtf == 0) {
@@ -29,8 +31,9 @@ void EnsureFormats() {
         g_fmtRtfNoObj = RegisterClipboardFormatW(L"Rich Text Format Without Objects");
         g_fmtHtml = RegisterClipboardFormatW(L"HTML Format");
         g_fmtPng = RegisterClipboardFormatW(L"PNG");
-        g_fmtIgnore1 = RegisterClipboardFormatW(L"Clipboard Viewer Ignore");
-        g_fmtIgnore2 = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+        for (size_t i = 0; i < privacy::kMarkerCount; ++i) {
+            g_fmtMarker[i] = RegisterClipboardFormatW(privacy::kMarkers[i].name);
+        }
     }
 }
 
@@ -304,6 +307,151 @@ bool SetFileDrop(const std::vector<uint8_t>& data) {
     return true;
 }
 
+// Full lowercased image path of the process `pid`, e.g. "c:\windows\notepad.exe",
+// or empty when it cannot be resolved.
+//
+// QueryFullProcessImageNameW rather than GetModuleFileNameExW: it is in
+// kernel32 and needs only PROCESS_QUERY_LIMITED_INFORMATION, so this reaches
+// elevated and protected-process-light targets that GetModuleFileNameExW
+// fails on, and it costs no new import library.
+std::wstring ProcessPathOfPid(DWORD pid) {
+    if (pid == 0) {
+        return {};
+    }
+    raii::HandleGuard proc(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!proc) {
+        return {};
+    }
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD len = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
+    if (!QueryFullProcessImageNameW(proc.get(), 0, path, &len) || len == 0) {
+        return {};
+    }
+    std::wstring full(path, len);
+    for (wchar_t& c : full) {
+        c = static_cast<wchar_t>(towlower(c));
+    }
+    return full;
+}
+
+// Lowercased file name of the process `pid`, e.g. "notepad.exe", or empty.
+std::wstring ProcessNameOfPid(DWORD pid) {
+    const std::wstring full = ProcessPathOfPid(pid);
+    if (full.empty()) {
+        return {};
+    }
+    const size_t slash = full.find_last_of(L"\\/");
+    return (slash == std::wstring::npos) ? full : full.substr(slash + 1);
+}
+
+// A UWP app's visible window belongs to ApplicationFrameHost.exe, which hosts
+// the real app's window as a child. Reporting the frame would label every
+// Store app copy "applicationframehost.exe", which tells the user nothing, so
+// when that is what we land on, look one level down for a child window owned
+// by a different process.
+const wchar_t kUwpFrameName[] = L"applicationframehost.exe";
+
+struct ForeignChildSearch {
+    DWORD framePid = 0;
+    DWORD found = 0;
+};
+
+BOOL CALLBACK FindForeignChild(HWND hwnd, LPARAM lparam) {
+    auto* search = reinterpret_cast<ForeignChildSearch*>(lparam);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != 0 && pid != search->framePid) {
+        search->found = pid;
+        return FALSE;  // stop enumerating, first one wins
+    }
+    return TRUE;
+}
+
+// Process id whose window this really is, resolving a UWP frame down to the
+// hosted child process (see kUwpFrameName above). Returns 0 for a null window.
+DWORD EffectivePidOfWindow(HWND hwnd) {
+    if (!hwnd) {
+        return 0;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (ProcessNameOfPid(pid) != kUwpFrameName) {
+        return pid;
+    }
+    ForeignChildSearch search{pid, 0};
+    EnumChildWindows(hwnd, FindForeignChild, reinterpret_cast<LPARAM>(&search));
+    return (search.found == 0) ? pid : search.found;
+}
+
+// Build the full blocklist match target for a window: process name, full image
+// path, and window title, all lowercased. Name and path come from the same
+// effective process (UWP-aware) so they never disagree; if that process cannot
+// be resolved, both fall back to the window's own process.
+blocklist::Target TargetOfWindow(HWND hwnd) {
+    blocklist::Target t;
+    if (!hwnd) {
+        return t;
+    }
+    DWORD pid = EffectivePidOfWindow(hwnd);
+    t.processName = ProcessNameOfPid(pid);
+    t.processPath = ProcessPathOfPid(pid);
+    if (t.processName.empty()) {
+        DWORD own = 0;
+        GetWindowThreadProcessId(hwnd, &own);
+        if (own != 0 && own != pid) {
+            t.processName = ProcessNameOfPid(own);
+            t.processPath = ProcessPathOfPid(own);
+        }
+    }
+    // Title is best-effort: GetWindowTextW on a foreign window can be slow if
+    // that window is hung, but Windows bounds the wait, and an empty title just
+    // means title-based rules cannot fire for it.
+    const int len = GetWindowTextLengthW(hwnd);
+    if (len > 0) {
+        std::wstring title(static_cast<size_t>(len) + 1, L'\0');
+        GetWindowTextW(hwnd, title.data(), len + 1);
+        title.resize(static_cast<size_t>(len));
+        for (wchar_t& c : title) {
+            c = static_cast<wchar_t>(towlower(c));
+        }
+        t.windowTitle = std::move(title);
+    }
+    return t;
+}
+
+// Decide whether the clipboard currently carries an exclusion marker. Called
+// with the clipboard open; `seqAtEntry` is the sequence number captured right
+// after opening it.
+//
+// The sequence number is re-checked once the payloads are in hand. Holding the
+// clipboard open does not stop another thread that already had it from
+// replacing the content, so without the re-check a marker read from the new
+// content could end up judging a payload taken from the old one. Dropping the
+// capture on mismatch costs nothing: the replacement fires its own
+// WM_CLIPBOARDUPDATE and gets captured on its own terms.
+bool ExcludedByMarker(DWORD seqAtEntry) {
+    privacy::Seen seen[privacy::kMarkerCount];
+    for (size_t i = 0; i < privacy::kMarkerCount; ++i) {
+        const UINT fmt = g_fmtMarker[i];
+        if (fmt == 0 || !IsClipboardFormatAvailable(fmt)) {
+            continue;
+        }
+        seen[i].present = true;
+        // Only lock and copy the payload for markers whose rule reads it. A
+        // presence marker is decided by IsClipboardFormatAvailable alone, and
+        // 64 bytes is far more than any documented boolean spelling needs.
+        if (privacy::kMarkers[i].rule == privacy::Rule::OnlyFalseValueExcludes) {
+            GetFormatBytes(fmt, seen[i].payload, 64);
+        }
+    }
+
+    if (GetClipboardSequenceNumber() != seqAtEntry) {
+        LOG_INFO("Capture: clipboard changed while reading exclusion markers, dropping");
+        return true;
+    }
+    return privacy::ShouldSkip(seen);
+}
+
 }  // namespace
 
 bool StartListening(HWND hwnd) {
@@ -323,106 +471,132 @@ bool IsSelfWrite() {
     return false;
 }
 
+blocklist::Target ResolveTarget(HWND hwnd) {
+    return TargetOfWindow(hwnd);
+}
+
 bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_t& imgH,
-             uint32_t maxTextBytes, uint32_t maxImagePixels) {
+             std::wstring& sourceApp, const blocklist::RuleSet& block, uint32_t maxTextBytes,
+             uint32_t maxImagePixels) {
     EnsureFormats();
     kind = ItemKind::Text;
     data.clear();
     imgW = 0;
     imgH = 0;
-
-    // Retry briefly: Office apps may still hold the clipboard right after a copy
-    bool opened = false;
-    int attempt = 0;
-    for (; attempt < 4; ++attempt) {
-        if (OpenClipboard(nullptr)) {
-            opened = true;
-            break;
-        }
-        Sleep(20);
-    }
-    if (!opened) {
-        LOG_WARNING("Capture: OpenClipboard failed after retries (clipboard busy)");
-        return false;
-    }
-    if (attempt > 0) {
-        LOG_INFO("Capture: OpenClipboard succeeded after %d retries", attempt);
-    }
-
-    // Exclusion flags: some programs (password managers) don't want to be recorded
-    if ((g_fmtIgnore1 && IsClipboardFormatAvailable(g_fmtIgnore1)) ||
-        (g_fmtIgnore2 && IsClipboardFormatAvailable(g_fmtIgnore2))) {
-        CloseClipboard();
-        return false;
-    }
+    sourceApp.clear();
 
     bool got = false;
-    std::vector<uint8_t> dibRaw;  // Raw DIB bytes, converted to PNG after CloseClipboard
+    std::vector<uint8_t> dibRaw;  // Raw DIB bytes, converted to PNG once the clipboard is closed
 
-    // Priority 1: RTF
-    if (!got && g_fmtRtf && IsClipboardFormatAvailable(g_fmtRtf)) {
-        if (GetFormatBytes(g_fmtRtf, data, maxTextBytes)) {
-            kind = ItemKind::Rtf;
-            got = true;
+    {
+        // Scoped deliberately: the clipboard must be provably closed before the
+        // PNG conversion below. Converting a large DIB takes tens of
+        // milliseconds, and holding the clipboard that long blocks every other
+        // application on the desktop from copying.
+        //
+        // Four attempts 20ms apart because Office and some installer UIs still
+        // hold the clipboard right after the copy that woke us up, and losing
+        // that copy outright is worse than waiting for it.
+        raii::ClipboardOpenGuard clip(nullptr, 4, 20);
+        if (!clip) {
+            LOG_WARNING("Capture: OpenClipboard failed after retries (clipboard busy)");
+            return false;
         }
-    }
-    // Priority 2: HTML
-    if (!got && g_fmtHtml && IsClipboardFormatAvailable(g_fmtHtml)) {
-        if (GetFormatBytes(g_fmtHtml, data, maxTextBytes)) {
-            kind = ItemKind::Html;
-            got = true;
+        if (clip.retries() > 0) {
+            LOG_INFO("Capture: OpenClipboard succeeded after %d retries", clip.retries());
         }
-    }
-    // Priority 3: Image — copy raw DIB bytes now, do heavy PNG conversion after release
-    if (!got && (IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB) ||
-                 IsClipboardFormatAvailable(CF_BITMAP))) {
-        HANDLE hMem = GetClipboardData(CF_DIBV5);
-        if (!hMem) {
-            hMem = GetClipboardData(CF_DIB);
+
+        // Where did this copy come from? Resolved while the clipboard is open:
+        // GetClipboardOwner() only describes the content we are about to read,
+        // and the owner window can be destroyed the moment we let go. The owner
+        // is the program that put the data there, which is what the user means
+        // by "copied from"; the foreground window is the fallback for the cases
+        // where ownership was claimed with a NULL window.
+        blocklist::Target target = TargetOfWindow(GetClipboardOwner());
+        if (target.processName.empty()) {
+            target = TargetOfWindow(GetForegroundWindow());
         }
-        if (hMem) {
-            SIZE_T size = GlobalSize(hMem);
-            raii::GlobalLockGuard lock(hMem);
-            if (lock && size > 0 && size <= 256u * 1024u * 1024u) {
-                const uint8_t* ptr = static_cast<const uint8_t*>(lock.get());
-                dibRaw.assign(ptr, ptr + size);
+        sourceApp = target.processName;
+
+        // Blocklist first: an app the user has suppressed should cost one window
+        // lookup, not a full RTF/HTML/image extraction that gets thrown away.
+        // Any matching rule — NoCapture or FullDisable — drops the copy here;
+        // FullDisable additionally gates the hotkeys in App::OnHotkey.
+        if (blocklist::Classify(block, target) != blocklist::Action::None) {
+            LOG_INFO("Capture: source app is on the blocklist, dropping");
+            return false;
+        }
+
+        // Exclusion markers are checked before any content is read: an excluded
+        // copy should cost one clipboard round trip, not a full RTF/HTML
+        // extraction that gets thrown away afterwards.
+        if (ExcludedByMarker(GetClipboardSequenceNumber())) {
+            return false;
+        }
+
+        // Priority 1: RTF
+        if (!got && g_fmtRtf && IsClipboardFormatAvailable(g_fmtRtf)) {
+            if (GetFormatBytes(g_fmtRtf, data, maxTextBytes)) {
+                kind = ItemKind::Rtf;
                 got = true;
             }
         }
-        if (!got && IsClipboardFormatAvailable(CF_BITMAP)) {
-            // Rare fallback: HBITMAP is only usable while the clipboard is open
-            std::vector<uint8_t> png;
-            uint32_t w = 0;
-            uint32_t h = 0;
-            if (GetImage(png, w, h, maxImagePixels)) {
-                kind = ItemKind::Image;
-                data = std::move(png);
-                imgW = w;
-                imgH = h;
+        // Priority 2: HTML
+        if (!got && g_fmtHtml && IsClipboardFormatAvailable(g_fmtHtml)) {
+            if (GetFormatBytes(g_fmtHtml, data, maxTextBytes)) {
+                kind = ItemKind::Html;
+                got = true;
+            }
+        }
+        // Priority 3: Image — copy raw DIB bytes now, do heavy PNG conversion after release
+        if (!got && (IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB) ||
+                     IsClipboardFormatAvailable(CF_BITMAP))) {
+            HANDLE hMem = GetClipboardData(CF_DIBV5);
+            if (!hMem) {
+                hMem = GetClipboardData(CF_DIB);
+            }
+            if (hMem) {
+                SIZE_T size = GlobalSize(hMem);
+                raii::GlobalLockGuard lock(hMem);
+                if (lock && size > 0 && size <= 256u * 1024u * 1024u) {
+                    const uint8_t* ptr = static_cast<const uint8_t*>(lock.get());
+                    dibRaw.assign(ptr, ptr + size);
+                    got = true;
+                }
+            }
+            if (!got && IsClipboardFormatAvailable(CF_BITMAP)) {
+                // Rare fallback: HBITMAP is only usable while the clipboard is open
+                std::vector<uint8_t> png;
+                uint32_t w = 0;
+                uint32_t h = 0;
+                if (GetImage(png, w, h, maxImagePixels)) {
+                    kind = ItemKind::Image;
+                    data = std::move(png);
+                    imgW = w;
+                    imgH = h;
+                    got = true;
+                }
+            }
+        }
+        // Priority 4: File list
+        if (!got && IsClipboardFormatAvailable(CF_HDROP)) {
+            if (GetFileDrop(data)) {
+                kind = ItemKind::FileDrop;
+                got = true;
+            }
+        }
+        // Priority 5: Plain text
+        if (!got && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+            std::wstring text;
+            if (GetText(text, maxTextBytes)) {
+                kind = ItemKind::Text;
+                data.assign(reinterpret_cast<const uint8_t*>(text.data()),
+                            reinterpret_cast<const uint8_t*>(text.data()) +
+                                text.size() * sizeof(wchar_t));
                 got = true;
             }
         }
     }
-    // Priority 4: File list
-    if (!got && IsClipboardFormatAvailable(CF_HDROP)) {
-        if (GetFileDrop(data)) {
-            kind = ItemKind::FileDrop;
-            got = true;
-        }
-    }
-    // Priority 5: Plain text
-    if (!got && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
-        std::wstring text;
-        if (GetText(text, maxTextBytes)) {
-            kind = ItemKind::Text;
-            data.assign(reinterpret_cast<const uint8_t*>(text.data()),
-                        reinterpret_cast<const uint8_t*>(text.data()) +
-                            text.size() * sizeof(wchar_t));
-            got = true;
-        }
-    }
-
-    CloseClipboard();
 
     // Convert DIB to PNG outside the clipboard lock (no longer blocking other apps)
     if (!dibRaw.empty()) {
@@ -444,7 +618,8 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
 
 bool WriteItem(HWND owner, const Item& item) {
     EnsureFormats();
-    if (!OpenClipboard(owner)) {
+    raii::ClipboardOpenGuard clip(owner);
+    if (!clip) {
         return false;
     }
     EmptyClipboard();
@@ -492,9 +667,10 @@ bool WriteItem(HWND owner, const Item& item) {
         }
     }
 
-    // Update self sequence number (changed after write)
+    // Update self sequence number (changed after write). Read before the guard
+    // closes the clipboard: this is the number the resulting WM_CLIPBOARDUPDATE
+    // will carry, and IsSelfWrite() matches on it to ignore our own paste.
     g_selfSeq = GetClipboardSequenceNumber();
-    CloseClipboard();
     return ok;
 }
 

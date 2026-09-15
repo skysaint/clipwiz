@@ -1,0 +1,20 @@
+# Tests live outside src/, so the root .clangd's relative "-Isrc" does not
+# resolve for them. clangd merges configs from every ancestor directory, so
+# this only adds the two include roots the test files need; the flags in the
+# root .clangd still apply.
+CompileFlags:
+  Add:
+    - --target=x86_64-pc-windows-msvc
+    - -std=c++17
+    - -DUNICODE
+    - -D_UNICODE
+    - -DWIN32_LEAN_AND_MEAN
+    - -DNOMINMAX
+    - -D_WIN32_WINNT=0x0A00
+    - -DWINVER=0x0A00
+    - -I../src
+    - -I.
+  Remove:
+    - -W*
+Diagnostics:
+  UnusedIncludes: None

@@ -3,14 +3,17 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cwctype>
 
 #include "i18n.h"
 #include "log.h"
+#include "mask.h"
+#include "textconv.h"
 #include "util.h"
 
 namespace {
 
-constexpr uint32_t kStoreVersion = 2;   // v2: added per-item `order` field (uint32)
+constexpr uint32_t kStoreVersion = 3;   // v3: added per-item `sourceApp` string
 constexpr size_t kHeaderSize = 32;
 const char kMagic[4] = {'C', 'L', 'P', 'W'};
 
@@ -23,6 +26,10 @@ constexpr uint32_t kUnpinnedOrderBase = 10001u;
 // Hard cap per item data to prevent corrupted files from exhausting memory (64 MB)
 constexpr uint32_t kMaxDataLen = 64u * 1024u * 1024u;
 constexpr uint32_t kMaxItemCount = 9999u;
+
+// Process image names are short. This only stops a damaged length prefix from
+// demanding an arbitrary allocation before the file is rejected.
+constexpr uint32_t kMaxSourceAppChars = 1024u;
 
 // FILETIME ticks per day
 constexpr uint64_t kTicksPerDay = 24ULL * 60 * 60 * 10000000;
@@ -48,399 +55,31 @@ bool FileExists(const std::wstring& path) {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-// Extract plain text from "HTML Format" raw data (rough: strip tags).
-// maxChars limits output length (in UTF-8 bytes before final decode); 0 = unlimited.
-std::wstring HtmlToPlainText(const std::vector<uint8_t>& data, size_t maxBytes = 0) {
-    // HTML Format is UTF-8 text; decode properly
-    std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
-    // Stop at NUL terminator
-    size_t nulPos = raw.find('\0');
-    if (nulPos != std::string::npos) {
-        raw.resize(nulPos);
-    }
-    // Find content after <body>
-    size_t start = 0;
-    size_t bodyPos = raw.find("<body");
-    if (bodyPos == std::string::npos) {
-        bodyPos = raw.find("<BODY");
-    }
-    if (bodyPos != std::string::npos) {
-        size_t gt = raw.find('>', bodyPos);
-        start = (gt != std::string::npos) ? gt + 1 : bodyPos;
-    }
+// Upper bound on how much text MakeItemSearchText extracts from rich content.
+// Plain text and file lists are bounded by their own payload size and are not
+// capped; this only keeps one pathological multi-megabyte RTF from turning a
+// single Add() or Load() into a full-document parse.
+//
+// It is a latency guard, not a memory guard: extracted text is never longer
+// than the markup it came from, so searchText for any kind is bounded by the
+// data already in memory.
+constexpr size_t kSearchTextLimit = 4096;  // wchars
 
-    // Helper: append a Unicode code point as UTF-8
-    auto appendUtf8 = [](std::string& s, uint32_t cp) {
-        if (cp < 0x80) {
-            s += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            s += static_cast<char>(0xC0 | (cp >> 6));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            s += static_cast<char>(0xE0 | (cp >> 12));
-            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            s += static_cast<char>(0xF0 | (cp >> 18));
-            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-    };
-
-    // Strip tags, decode HTML entities
-    std::string utf8;
-    bool inTag = false;
-    for (size_t i = start; i < raw.size() && (maxBytes == 0 || utf8.size() < maxBytes); ++i) {
-        char ch = raw[i];
-        if (ch == '<') {
-            inTag = true;
-            continue;
-        }
-        if (ch == '>') {
-            inTag = false;
-            continue;
-        }
-        if (inTag) {
-            continue;
-        }
-        if (ch == '\r' || ch == '\n') {
-            if (!utf8.empty() && utf8.back() != ' ') {
-                utf8 += ' ';
-            }
-            continue;
-        }
-        if (ch == '&') {
-            // Try to decode HTML entity
-            size_t semi = raw.find(';', i + 1);
-            if (semi != std::string::npos && semi - i <= 12) {
-                std::string ent = raw.substr(i + 1, semi - i - 1);
-                bool decoded = true;
-                if (ent == "nbsp" || ent == "#160") {
-                    utf8 += ' ';
-                } else if (ent == "amp") {
-                    utf8 += '&';
-                } else if (ent == "lt") {
-                    utf8 += '<';
-                } else if (ent == "gt") {
-                    utf8 += '>';
-                } else if (ent == "quot") {
-                    utf8 += '"';
-                } else if (ent == "apos") {
-                    utf8 += '\'';
-                } else if (ent == "mdash") {
-                    appendUtf8(utf8, 0x2014);
-                } else if (ent == "ndash") {
-                    appendUtf8(utf8, 0x2013);
-                } else if (ent == "hellip") {
-                    appendUtf8(utf8, 0x2026);
-                } else if (!ent.empty() && ent[0] == '#') {
-                    uint32_t cp = 0;
-                    if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X')) {
-                        cp = static_cast<uint32_t>(strtoul(ent.c_str() + 2, nullptr, 16));
-                    } else {
-                        cp = static_cast<uint32_t>(strtoul(ent.c_str() + 1, nullptr, 10));
-                    }
-                    if (cp > 0 && cp < 0x110000) {
-                        appendUtf8(utf8, cp);
-                    }
-                } else {
-                    decoded = false;
-                }
-                if (decoded) {
-                    i = semi;  // Skip past entity
-                    continue;
-                }
-            }
-            // Not a recognized entity, output '&' literally
-            utf8 += '&';
-            continue;
-        }
-        utf8 += ch;
-    }
-    // Decode UTF-8 to wide string
-    if (utf8.empty()) {
-        return {};
-    }
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
-                                   nullptr, 0);
-    if (wlen <= 0) {
-        return {};
-    }
-    std::wstring text(static_cast<size_t>(wlen), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), text.data(), wlen);
-    return text;
-}
-
-// Decode a byte buffer using the specified code page, append to text
-void DecodeBytes(const std::vector<uint8_t>& buf, UINT codePage, std::wstring& text) {
-    if (buf.empty()) {
-        return;
-    }
-    int wlen = MultiByteToWideChar(codePage, 0, reinterpret_cast<const char*>(buf.data()),
-                                   static_cast<int>(buf.size()), nullptr, 0);
-    if (wlen > 0) {
-        size_t oldSize = text.size();
-        text.resize(oldSize + static_cast<size_t>(wlen));
-        MultiByteToWideChar(codePage, 0, reinterpret_cast<const char*>(buf.data()),
-                            static_cast<int>(buf.size()), text.data() + oldSize, wlen);
-    }
-}
-
-// Destination groups whose content should be entirely skipped
-static bool IsSkipDestination(const std::string& word) {
-    static const char* const kSkip[] = {
-        "fonttbl", "colortbl", "stylesheet", "pict", "object",
-        "themedata", "listtable", "listoverridetable", "rsidtbl",
-        "generator", "info", "latentstyles", "datastore", "mmathPr",
-        "wgrffmtfilter", "mso", "xmlnstbl", "pgptbl", "revtbl",
-    };
-    for (const char* s : kSkip) {
-        if (word == s) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Extract plain text from RTF raw data
-// Handles: \uNNNN (Unicode), \'xx (code page bytes), \ansicpgN, \ucN
-// Uses a per-group skip stack so nested destinations are handled correctly.
-// maxChars limits output length (in wchar_t); 0 = unlimited.
-std::wstring RtfToPlainText(const std::vector<uint8_t>& data, size_t maxChars = 0) {
-    std::string raw(reinterpret_cast<const char*>(data.data()), data.size());
-    // Stop at NUL terminator (clipboard RTF is typically NUL-terminated)
-    size_t nulPos = raw.find('\0');
-    if (nulPos != std::string::npos) {
-        raw.resize(nulPos);
-    }
-
-    std::wstring text;
-    std::vector<bool> groupSkip;  // Per-depth skip flag
-    int skipCount = 0;            // Number of active skip levels
-    UINT codePage = CP_ACP;       // Declared by \ansicpgN; default = system ANSI
-    int ucSkip = 1;               // Fallback chars after \uNNNN (from \ucN)
-    std::vector<uint8_t> pendingBytes;
-    size_t i = 0;
-
-    auto flushBytes = [&]() {
-        if (!pendingBytes.empty()) {
-            DecodeBytes(pendingBytes, codePage, text);
-            pendingBytes.clear();
-        }
-    };
-
-    while (i < raw.size() && (maxChars == 0 || text.size() < maxChars)) {
-        char ch = raw[i];
-
-        if (ch == '{') {
-            flushBytes();
-            ++i;
-            // Detect if this group is a skippable destination
-            bool skip = false;
-            if (i < raw.size() && raw[i] == '\\') {
-                if (i + 1 < raw.size() && raw[i + 1] == '*') {
-                    // {\*\xxx} - ignorable destination, always skip
-                    skip = true;
-                } else {
-                    // {\word ...} - check known destinations
-                    size_t ws = i + 1;
-                    size_t we = ws;
-                    while (we < raw.size() && isalpha(static_cast<unsigned char>(raw[we]))) {
-                        ++we;
-                    }
-                    std::string w = raw.substr(ws, we - ws);
-                    if (w == "pict" && skipCount == 0) {
-                        // Embedded image: extract dimensions for placeholder
-                        long picW = 0, picH = 0;
-                        long goalW = 0, goalH = 0;
-                        size_t scan = we;
-                        size_t scanEnd = (std::min)(scan + 400, raw.size());
-                        while (scan < scanEnd) {
-                            if (raw[scan] == '}') {
-                                break;
-                            }
-                            if (raw[scan] == '\\') {
-                                ++scan;
-                                size_t cs = scan;
-                                while (scan < scanEnd &&
-                                       isalpha(static_cast<unsigned char>(raw[scan]))) {
-                                    ++scan;
-                                }
-                                std::string cw = raw.substr(cs, scan - cs);
-                                std::string cp;
-                                if (scan < scanEnd &&
-                                    (raw[scan] == '-' ||
-                                     isdigit(static_cast<unsigned char>(raw[scan])))) {
-                                    size_t ps = scan;
-                                    while (scan < scanEnd &&
-                                           (raw[scan] == '-' ||
-                                            isdigit(static_cast<unsigned char>(raw[scan])))) {
-                                        ++scan;
-                                    }
-                                    cp = raw.substr(ps, scan - ps);
-                                }
-                                if (cw == "picwgoal" && !cp.empty()) {
-                                    goalW = strtol(cp.c_str(), nullptr, 10);
-                                } else if (cw == "pichgoal" && !cp.empty()) {
-                                    goalH = strtol(cp.c_str(), nullptr, 10);
-                                } else if (cw == "picw" && !cp.empty()) {
-                                    picW = strtol(cp.c_str(), nullptr, 10);
-                                } else if (cw == "pich" && !cp.empty()) {
-                                    picH = strtol(cp.c_str(), nullptr, 10);
-                                }
-                            } else {
-                                ++scan;
-                            }
-                        }
-                        // Prefer display goals (twips); fall back to native size
-                        long twipsW = goalW > 0 ? goalW : picW;
-                        long twipsH = goalH > 0 ? goalH : picH;
-                        int pxW = twipsW > 0 ? static_cast<int>(twipsW / 15) : 0;
-                        int pxH = twipsH > 0 ? static_cast<int>(twipsH / 15) : 0;
-                        if (pxW > 0 && pxH > 0) {
-                            wchar_t buf[32];
-                            swprintf_s(buf, L"[\x56fe\x7247 %d\x00d7%d]", pxW, pxH);
-                            text += buf;
-                        } else {
-                            text += L"[\x56fe\x7247]";
-                        }
-                        skip = true;
-                    } else if (IsSkipDestination(w)) {
-                        skip = true;
-                    }
-                }
-            }
-            groupSkip.push_back(skip);
-            if (skip) {
-                ++skipCount;
-            }
-            continue;
-        }
-
-        if (ch == '}') {
-            flushBytes();
-            if (!groupSkip.empty()) {
-                if (groupSkip.back()) {
-                    --skipCount;
-                }
-                groupSkip.pop_back();
-            }
-            ++i;
-            continue;
-        }
-
-        // Skip content inside destination groups
-        if (skipCount > 0) {
-            ++i;
-            continue;
-        }
-
-        if (ch == '\\') {
-            ++i;
-            if (i >= raw.size()) {
-                break;
-            }
-            char next = raw[i];
-            if (next == '\\' || next == '{' || next == '}') {
-                flushBytes();
-                text += static_cast<wchar_t>(next);
-                ++i;
-                continue;
-            }
-            if (next == '\'') {
-                // \'xx hexadecimal byte in document code page
-                ++i;
-                if (i + 1 < raw.size()) {
-                    char hex[3] = {raw[i], raw[i + 1], 0};
-                    int val = static_cast<int>(strtol(hex, nullptr, 16));
-                    pendingBytes.push_back(static_cast<uint8_t>(val));
-                    i += 2;
-                }
-                continue;
-            }
-            if (next == '\r' || next == '\n') {
-                ++i;
-                continue;
-            }
-            if (next == '*') {
-                // \* outside group open (shouldn't happen normally), skip char
-                ++i;
-                continue;
-            }
-            // Control word
-            flushBytes();
-            size_t wordStart = i;
-            while (i < raw.size() && isalpha(static_cast<unsigned char>(raw[i]))) {
-                ++i;
-            }
-            std::string word = raw.substr(wordStart, i - wordStart);
-            // Read optional numeric parameter
-            std::string param;
-            if (i < raw.size() && (raw[i] == '-' || isdigit(static_cast<unsigned char>(raw[i])))) {
-                size_t paramStart = i;
-                while (i < raw.size() &&
-                       (raw[i] == '-' || isdigit(static_cast<unsigned char>(raw[i])))) {
-                    ++i;
-                }
-                param = raw.substr(paramStart, i - paramStart);
-            }
-            // Space after control word is a delimiter, consume it
-            if (i < raw.size() && raw[i] == ' ') {
-                ++i;
-            }
-            if (word == "u" && !param.empty()) {
-                // \uNNNN: Unicode character; skip ucSkip fallback characters
-                long cp = strtol(param.c_str(), nullptr, 10);
-                if (cp < 0) {
-                    cp += 65536;  // RTF uses signed 16-bit
-                }
-                if (cp >= 0x20) {
-                    text += static_cast<wchar_t>(cp);
-                }
-                // Skip fallback characters (\'xx or literal)
-                int skipped = 0;
-                while (skipped < ucSkip && i < raw.size()) {
-                    if (raw[i] == '\\' && i + 1 < raw.size() && raw[i + 1] == '\'') {
-                        i += 4;  // Skip \'xx
-                        ++skipped;
-                    } else if (raw[i] == '\\') {
-                        break;  // Another control word, stop skipping
-                    } else {
-                        ++i;
-                        ++skipped;
-                    }
-                }
-            } else if (word == "ansicpg" && !param.empty()) {
-                codePage = static_cast<UINT>(strtoul(param.c_str(), nullptr, 10));
-            } else if (word == "uc" && !param.empty()) {
-                ucSkip = static_cast<int>(strtol(param.c_str(), nullptr, 10));
-                if (ucSkip < 0) {
-                    ucSkip = 0;
-                }
-            } else if (word == "par" || word == "line") {
-                text += L' ';
-            } else if (word == "tab") {
-                text += L'\t';
-            }
-            continue;
-        }
-
-        if (ch == '\r' || ch == '\n') {
-            ++i;
-            continue;
-        }
-        // Non-ASCII raw byte: accumulate for code page decoding
-        if (static_cast<unsigned char>(ch) >= 0x80) {
-            pendingBytes.push_back(static_cast<uint8_t>(ch));
-        } else {
-            flushBytes();
-            text += static_cast<wchar_t>(ch);
-        }
-        ++i;
-    }
-    flushBytes();
-    return text;
+// preview and searchText are both derived from data and neither is persisted.
+// They are always recomputed together, so a content change cannot leave one of
+// them describing the old bytes.
+//
+// Both are masked on the way out. preview keeps its original case, so every
+// scanner can fire on it, including the password heuristic (which needs an
+// uppercase letter). searchText is already lowercased by MakeItemSearchText, so
+// only the case-insensitive structural scanners (email/phone/ID/API-key) match
+// there and the password heuristic harmlessly skips it. That split is fine: a
+// password is still hidden in the preview and the hover view, searchText is
+// never shown on screen, and item.data is never masked — so what gets pasted is
+// always the full original.
+void FillDerived(Item& item, const mask::Config& mc) {
+    item.preview = mask::Apply(MakeItemPreview(item), mc);
+    item.searchText = mask::Apply(MakeItemSearchText(item), mc);
 }
 
 }  // namespace
@@ -455,97 +94,14 @@ std::wstring Store::TextOf(const Item& item) {
             return std::wstring(reinterpret_cast<const wchar_t*>(item.data.data()),
                                 item.data.size() / sizeof(wchar_t));
         case ItemKind::Html:
-            return HtmlToPlainText(item.data);
+            return textconv::HtmlToPlainText(item.data);
         case ItemKind::Rtf:
-            return RtfToPlainText(item.data);
+            return textconv::RtfToPlainText(item.data);
         case ItemKind::Image:
             return std::wstring();
         default:
             return std::wstring();
     }
-}
-
-// Canonical dedup hash.
-//
-// Two entries are considered "the same content" when their *meaningful*
-// content matches, not their raw clipboard bytes. Rich text (RTF/HTML) from
-// editors like Word embeds volatile bytes (revision ids, timestamps, font
-// tables, GUIDs) that differ on every copy of the exact same passage, so
-// hashing raw bytes wrongly treats them as distinct. Instead we hash the
-// extracted plain-text body.
-//
-// A per-kind prefix keeps different kinds distinct: a plain-text "hello" and
-// an RTF "hello" must remain two separate entries (one carries formatting).
-// Images have no text body, so they hash their raw (PNG) bytes.
-
-// The meaningful body used for dedup: extracted plain text for text kinds,
-// raw bytes for images. Empty for rich text that carries no extractable text
-// (formatting-only or unparseable) — callers must NOT treat two empty bodies
-// as duplicates; fall back to raw-byte comparison in that case.
-static std::vector<uint8_t> CanonicalBody(ItemKind kind, const std::vector<uint8_t>& data) {
-    if (kind == ItemKind::Image) {
-        return data;  // No text body: dedup images by raw bytes.
-    }
-    std::wstring text;
-    switch (kind) {
-        case ItemKind::Text:
-        case ItemKind::FileDrop:
-            text.assign(reinterpret_cast<const wchar_t*>(data.data()),
-                        data.size() / sizeof(wchar_t));
-            break;
-        case ItemKind::Html: text = HtmlToPlainText(data); break;
-        case ItemKind::Rtf:  text = RtfToPlainText(data);  break;
-        default: break;
-    }
-    return std::vector<uint8_t>(
-        reinterpret_cast<const uint8_t*>(text.data()),
-        reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
-}
-
-static const char* CanonicalPrefix(ItemKind kind) {
-    switch (kind) {
-        case ItemKind::Text:     return "TXT:";
-        case ItemKind::FileDrop: return "FILE:";
-        case ItemKind::Html:     return "HTML:";
-        case ItemKind::Rtf:      return "RTF:";
-        case ItemKind::Image:    return "IMG:";
-        default:                 return "?:";
-    }
-}
-
-static uint64_t CanonicalHash(ItemKind kind, const std::vector<uint8_t>& data) {
-    const std::vector<uint8_t> body = CanonicalBody(kind, data);
-    const char* prefix = CanonicalPrefix(kind);
-    std::vector<uint8_t> buf;
-    const size_t plen = std::strlen(prefix);
-    buf.reserve(plen + body.size());
-    buf.insert(buf.end(), prefix, prefix + plen);
-    buf.insert(buf.end(), body.begin(), body.end());
-    return util::Hash64(buf.data(), buf.size());
-}
-
-// The single shared "these two are the same content" predicate, used by Add(),
-// Load() dedup, and conversion merges. Two items match when they are the same
-// kind and same canonical hash AND either:
-//   - the incoming canonical body is non-empty (a real plain-text/image match), or
-//   - their raw bytes are byte-equal (fallback for empty-body rich text and as
-//     a hash-collision safety belt — prevents unrelated formatting-only RTF/HTML
-//     from merging just because both extract to empty text).
-// `incomingBodyEmpty` is precomputed once by the caller to avoid re-extracting
-// the incoming plain text on every comparison.
-static bool SameCanonicalContent(const Item& existing, ItemKind kind,
-                                 const std::vector<uint8_t>& data, uint64_t hash,
-                                 bool incomingBodyEmpty) {
-    if (existing.kind != kind || existing.hash != hash) return false;
-    if (!incomingBodyEmpty) return true;     // real body match
-    return existing.data == data;            // empty body: require exact bytes
-}
-
-// Convenience overload: extracts the body itself (single-comparison callers).
-static bool SameCanonicalContent(const Item& existing, ItemKind kind,
-                                 const std::vector<uint8_t>& data, uint64_t hash) {
-    return SameCanonicalContent(existing, kind, data, hash,
-                                CanonicalBody(kind, data).empty());
 }
 
 std::wstring MakeItemPreview(const Item& item) {
@@ -588,10 +144,10 @@ std::wstring MakeItemPreview(const Item& item) {
             constexpr size_t kPreviewLimit = 500;  // wchars, plenty for OneLinePreview(160)
             switch (item.kind) {
                 case ItemKind::Html:
-                    text = HtmlToPlainText(item.data, kPreviewLimit * 3);  // UTF-8 bytes
+                    text = textconv::HtmlToPlainText(item.data, kPreviewLimit * 3);  // UTF-8 bytes
                     break;
                 case ItemKind::Rtf:
-                    text = RtfToPlainText(item.data, kPreviewLimit);
+                    text = textconv::RtfToPlainText(item.data, kPreviewLimit);
                     break;
                 default:
                     text = Store::TextOf(item);
@@ -601,6 +157,41 @@ std::wstring MakeItemPreview(const Item& item) {
             return preview.empty() ? std::wstring(i18n::T("preview.empty")) : preview;
         }
     }
+}
+
+std::wstring MakeItemSearchText(const Item& item) {
+    std::wstring text;
+    switch (item.kind) {
+        case ItemKind::Image:
+            // An image has no text of its own; the localized "[Image W×H]"
+            // summary is the only thing a user could type to find it.
+            text = MakeItemPreview(item);
+            break;
+        case ItemKind::Html: {
+            // HtmlToPlainText's budget is counted in UTF-8 bytes, so ASCII
+            // content can yield up to three times as many characters as the
+            // same budget buys in Rtf. Trim here so both rich kinds land on
+            // exactly kSearchTextLimit characters.
+            text = textconv::HtmlToPlainText(item.data, kSearchTextLimit * 3);
+            if (text.size() > kSearchTextLimit) {
+                text.resize(kSearchTextLimit);
+            }
+            break;
+        }
+        case ItemKind::Rtf:
+            text = textconv::RtfToPlainText(item.data, kSearchTextLimit);
+            break;
+        default:
+            // Text: the whole payload, not the 160-char one-line preview.
+            // FileDrop: every path, not just the first file name the preview
+            // shows — searching for the third file in a selection must work.
+            text = Store::TextOf(item);
+            break;
+    }
+    for (wchar_t& c : text) {
+        c = static_cast<wchar_t>(towlower(c));
+    }
+    return text;
 }
 
 // ------------------------------------------------------------------ Store
@@ -654,6 +245,10 @@ void Store::SetLimits(int maxTotal, int expiryDays) {
     expiryDays_ = std::max(0, expiryDays);
     ExpireCheck();
     Evict();
+}
+
+void Store::SetMaskConfig(const mask::Config& mc) {
+    maskCfg_ = mc;
 }
 
 // ---- Core sorting helpers ----
@@ -732,12 +327,13 @@ void Store::ExpireCheck() {
     if (items_.size() != before && !items_.empty()) Normalize(items_);
 }
 
-uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uint32_t imgH) {
+uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uint32_t imgH,
+                    const std::wstring& sourceApp) {
     if (data.empty()) return 0;
     // Dedup by canonical content (plain-text body + type prefix), NOT raw bytes:
     // Word/browsers emit different RTF/HTML bytes for the exact same passage.
-    const uint64_t hash = CanonicalHash(kind, data);
-    const bool bodyEmpty = CanonicalBody(kind, data).empty();
+    const uint64_t hash = textconv::CanonicalHash(kind, data);
+    const bool bodyEmpty = textconv::CanonicalBody(kind, data).empty();
     const uint64_t now = util::NowFileTime();
 
     // Dedup: same kind + same canonical content. On a hit we KEEP THE NEW
@@ -745,17 +341,20 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     // and expects to paste the latest version), then apply 选择性前置操作.
     //
     // NOTE: items_ is NOT guaranteed to hold at most one entry per canonical
-    // hash. ConvertToPlainText's "both pinned" branch and Load() may leave two
+    // hash: ConvertToPlainText's "both pinned" branch can leave two
     // identical-hash entries coexisting. This loop refreshes the FIRST match in
     // display order, which is the intended behavior (the topmost duplicate).
     for (Item& item : items_) {
-        if (SameCanonicalContent(item, kind, data, hash, bodyEmpty)) {
+        if (textconv::SameCanonicalContent(item, kind, data, hash, bodyEmpty)) {
             const uint64_t dupId = item.id;
             // Refresh the stored bytes to the newest copy (same canonical hash).
             item.data = std::move(data);
             item.imgW = imgW;
             item.imgH = imgH;
-            item.preview = MakeItemPreview(item);
+            // The source app describes the newest copy as well: re-copying the
+            // same passage from a different program should say so.
+            item.sourceApp = sourceApp;
+            FillDerived(item, maskCfg_);
             if (item.pinned) {
                 // Pinned: content updated, but position/pin/usedAt unchanged.
                 return dupId;
@@ -783,9 +382,10 @@ uint64_t Store::Add(ItemKind kind, std::vector<uint8_t> data, uint32_t imgW, uin
     item.data = std::move(data);
     item.imgW = imgW;
     item.imgH = imgH;
+    item.sourceApp = sourceApp;
     item.hash = hash;
     item.pinned = false;
-    item.preview = MakeItemPreview(item);
+    FillDerived(item, maskCfg_);
     const uint64_t id = item.id;
     items_.push_back(std::move(item));
     PromoteToFront(id);  // 选择性前置操作: newest at top of unpinned section
@@ -822,34 +422,8 @@ void Store::ClearNonPinned() {
 
 void Store::RefreshPreviews() {
     for (Item& item : items_) {
-        item.preview = MakeItemPreview(item);
+        FillDerived(item, maskCfg_);
     }
-}
-
-void Store::DedupAll() {
-    // Merge duplicate canonical-content items. Keep the one earlier in display
-    // order (smaller index), drop the later one; but never remove a pinned item
-    // when its duplicate is also pinned (pinned = user-only deletion). Assumes
-    // items_ is already normalized so indices reflect display order.
-    bool changed = false;
-    for (size_t i = 0; i < items_.size(); ++i) {
-        const bool bodyEmpty = CanonicalBody(items_[i].kind, items_[i].data).empty();
-        for (size_t j = i + 1; j < items_.size();) {
-            if (SameCanonicalContent(items_[j], items_[i].kind, items_[i].data,
-                                     items_[i].hash, bodyEmpty)) {
-                if (items_[i].pinned && items_[j].pinned) {
-                    ++j;  // Both pinned: keep both, leave the duplicate in place.
-                    continue;
-                }
-                items_.erase(items_.begin() + static_cast<ptrdiff_t>(j));
-                changed = true;
-                // don't advance j: the erased slot now holds the next item
-            } else {
-                ++j;
-            }
-        }
-    }
-    if (changed && !items_.empty()) Normalize(items_);
 }
 
 uint64_t Store::ConvertToPlainText(uint64_t id) {
@@ -873,7 +447,7 @@ uint64_t Store::ConvertToPlainText(uint64_t id) {
         reinterpret_cast<const uint8_t*>(text.data()) + text.size() * sizeof(wchar_t));
     // Canonical hash of the resulting Text entry (same scheme as Add uses),
     // so it dedups correctly against existing plain-text entries.
-    const uint64_t newHash = CanonicalHash(ItemKind::Text, bytes);
+    const uint64_t newHash = textconv::CanonicalHash(ItemKind::Text, bytes);
 
     LOG_INFO("ConvertToPlainText: id=%llu oldKind=%u idx=%zu -> Text, textLen=%zu newHash=%llu",
              (unsigned long long)id, (unsigned)items_[idx].kind, idx, text.size(),
@@ -884,7 +458,7 @@ uint64_t Store::ConvertToPlainText(uint64_t id) {
     items_[idx].kind = ItemKind::Text;
     items_[idx].data = std::move(bytes);
     items_[idx].hash = newHash;
-    items_[idx].preview = MakeItemPreview(items_[idx]);
+    FillDerived(items_[idx], maskCfg_);
 
     // Dedup fallout: converting may make this entry identical to an existing
     // plain-text entry. Merge to restore the "no duplicates" invariant.
@@ -897,7 +471,7 @@ uint64_t Store::ConvertToPlainText(uint64_t id) {
     for (size_t i = 0; i < items_.size(); ++i) {
         if (i == idx) continue;
         // Shared predicate: hash match with an empty-body / collision safety belt.
-        if (SameCanonicalContent(items_[i], ItemKind::Text, items_[idx].data, newHash)) {
+        if (textconv::SameCanonicalContent(items_[i], ItemKind::Text, items_[idx].data, newHash)) {
             dupIdx = i;
             break;
         }
@@ -1014,6 +588,87 @@ Store::LoadResult Store::PreserveCorrupt() {
     return LoadResult::Corrupt;
 }
 
+// The single parser for the Serialize() on-disk layout. Validates framing and
+// fills `out` (hash + derived preview/searchText rebuilt) and `outNextId` from
+// buf, WITHOUT touching any member state — so Load() can point it at items_ and
+// ImportMerge() at a throwaway list, and "what is a valid v3 store" is defined
+// exactly once. Returns false on bad magic, wrong version, over-cap count, or
+// any truncated / mis-framed item. No version migration: only the layout
+// Serialize() writes is accepted (see the note in store.h).
+bool Store::ParseBuffer(const std::vector<uint8_t>& buf, std::vector<Item>& out,
+                        uint64_t& outNextId) {
+    out.clear();
+    outNextId = 1;
+    if (buf.size() < kHeaderSize || memcmp(buf.data(), kMagic, 4) != 0) {
+        return false;
+    }
+
+    size_t pos = 4;
+    uint32_t version = 0;
+    uint32_t count = 0;
+    uint64_t headerNextId = 0;
+    if (!Take(buf, pos, version) || !Take(buf, pos, count) || !Take(buf, pos, headerNextId)) {
+        return false;
+    }
+    if (version != kStoreVersion) {
+        LOG_WARNING("ParseBuffer: unsupported store version %u (expected %u)",
+                    (unsigned)version, (unsigned)kStoreVersion);
+        return false;
+    }
+    if (count > kMaxItemCount) {
+        return false;
+    }
+    pos = kHeaderSize;
+
+    out.reserve(count);
+    uint64_t computedNextId = 1;
+    for (uint32_t i = 0; i < count; ++i) {
+        Item item;
+        uint32_t kind = 0;
+        uint32_t flags = 0;
+        uint32_t dataLen = 0;
+        uint32_t appLen = 0;
+        if (!Take(buf, pos, item.id) || !Take(buf, pos, kind) || !Take(buf, pos, flags) ||
+            !Take(buf, pos, item.createdAt) || !Take(buf, pos, item.usedAt) ||
+            !Take(buf, pos, item.imgW) || !Take(buf, pos, item.imgH) ||
+            !Take(buf, pos, item.order) || !Take(buf, pos, dataLen)) {
+            return false;
+        }
+        if (kind > static_cast<uint32_t>(ItemKind::FileDrop) || dataLen > kMaxDataLen) {
+            return false;
+        }
+        if (pos + dataLen > buf.size()) {
+            return false;
+        }
+        item.kind = static_cast<ItemKind>(kind);
+        item.pinned = (flags & kFlagPinned) != 0;
+        item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
+        pos += dataLen;
+
+        // sourceApp trails the payload: length prefix in bytes, UTF-16LE, no
+        // terminator. It is a persisted fact, so it is read verbatim rather
+        // than recomputed — the owning process may be long gone by now.
+        if (!Take(buf, pos, appLen) || (appLen % sizeof(wchar_t)) != 0 ||
+            appLen > kMaxSourceAppChars * static_cast<uint32_t>(sizeof(wchar_t)) ||
+            pos + appLen > buf.size()) {
+            return false;
+        }
+        item.sourceApp.assign(reinterpret_cast<const wchar_t*>(buf.data() + pos),
+                              appLen / sizeof(wchar_t));
+        pos += appLen;
+
+        item.hash = textconv::CanonicalHash(item.kind, item.data);
+        FillDerived(item, maskCfg_);
+        if (item.id >= computedNextId) {
+            computedNextId = item.id + 1;
+        }
+        out.push_back(std::move(item));
+    }
+
+    outNextId = headerNextId > computedNextId ? headerNextId : computedNextId;
+    return true;
+}
+
 Store::LoadResult Store::Load() {
     items_.clear();
     nextId_ = 1;
@@ -1027,77 +682,43 @@ Store::LoadResult Store::Load() {
     if (!util::ReadWholeFile(path, buf)) {
         return PreserveCorrupt();
     }
-    if (buf.size() < kHeaderSize || memcmp(buf.data(), kMagic, 4) != 0) {
-        return PreserveCorrupt();
-    }
-
-    size_t pos = 4;
-    uint32_t version = 0;
-    uint32_t count = 0;
-    uint64_t nextId = 0;
-    if (!Take(buf, pos, version) || !Take(buf, pos, count) || !Take(buf, pos, nextId)) {
-        return PreserveCorrupt();
-    }
-    // Accept v1 (legacy, no per-item order) and v2 (current).
-    if (version != 1u && version != kStoreVersion) {
-        return PreserveCorrupt();
-    }
-    if (count > kMaxItemCount) {
-        return PreserveCorrupt();
-    }
-    const bool haveOrder = (version >= 2u);
-    pos = kHeaderSize;
 
     std::vector<Item> loaded;
-    loaded.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        Item item;
-        uint32_t kind = 0;
-        uint32_t flags = 0;
-        uint32_t order = 0;
-        uint32_t dataLen = 0;
-        if (!Take(buf, pos, item.id) || !Take(buf, pos, kind) || !Take(buf, pos, flags) ||
-            !Take(buf, pos, item.createdAt) || !Take(buf, pos, item.usedAt) ||
-            !Take(buf, pos, item.imgW) || !Take(buf, pos, item.imgH) ||
-            (haveOrder && !Take(buf, pos, order)) ||
-            !Take(buf, pos, dataLen)) {
-            return PreserveCorrupt();
-        }
-        if (kind > static_cast<uint32_t>(ItemKind::FileDrop) || dataLen > kMaxDataLen) {
-            return PreserveCorrupt();
-        }
-        if (pos + dataLen > buf.size()) {
-            return PreserveCorrupt();
-        }
-        item.kind = static_cast<ItemKind>(kind);
-        item.pinned = (flags & kFlagPinned) != 0;
-        item.order = haveOrder ? order : 0u;  // Legacy (v1): order=0, fixed by Normalize
-        item.data.assign(buf.data() + pos, buf.data() + pos + dataLen);
-        pos += dataLen;
-
-        item.hash = CanonicalHash(item.kind, item.data);
-        item.preview = MakeItemPreview(item);
-        if (item.id >= nextId_) {
-            nextId_ = item.id + 1;
-        }
-        loaded.push_back(std::move(item));
+    uint64_t parsedNextId = 1;
+    if (!ParseBuffer(buf, loaded, parsedNextId)) {
+        return PreserveCorrupt();
     }
 
     items_ = std::move(loaded);
-    if (nextId > nextId_) {
-        nextId_ = nextId;
+    if (parsedNextId > nextId_) {
+        nextId_ = parsedNextId;
     }
-    // For legacy files (no order field), stable_partition preserves file order;
-    // for v2 files, SortByOrder arranges by persisted order values.
-    // Either way, Normalize produces contiguous [1..P] + [10001..10001+U-1].
+    // SortByOrder arranges by the persisted order values; Normalize then makes
+    // them contiguous [1..P] + [10001..10001+U-1].
     Normalize(items_);
-    // A store written before canonical hashing (v1.1.0 raw-byte dedup) can hold
-    // items that now hash identically (e.g. rich text that flattens alike).
-    // Merge them so the loaded state honors the same "no duplicates" invariant
-    // that Add() maintains.
-    DedupAll();
     Evict();
     return LoadResult::Ok;
+}
+
+int Store::ImportMerge(const std::vector<uint8_t>& buf) {
+    std::vector<Item> incoming;
+    uint64_t ignoredNextId = 0;
+    if (!ParseBuffer(buf, incoming, ignoredNextId)) {
+        // Not a readable v3 backup. items_ is untouched and nothing is renamed:
+        // this is a file the user pointed us at, not our own store.dat, so the
+        // caller just reports the failure and the current history stays put.
+        return -1;
+    }
+    int merged = 0;
+    for (Item& src : incoming) {
+        // Through Add(), so an imported entry dedups against what is already
+        // here, existing pinned items are never disturbed, and the total cap is
+        // enforced exactly as for a fresh copy.
+        if (Add(src.kind, std::move(src.data), src.imgW, src.imgH, src.sourceApp) != 0) {
+            ++merged;
+        }
+    }
+    return merged;
 }
 
 bool Store::Save() {
@@ -1106,12 +727,33 @@ bool Store::Save() {
     return util::WriteFileAtomic(util::StorePath(), buf.data(), buf.size());
 }
 
+// On-disk layout, little-endian throughout. This is the ONLY layout Load()
+// accepts, so it is written out here rather than implied by the code below.
+//
+//   header (32 bytes)
+//     magic     "CLPW"            4
+//     version   kStoreVersion     4
+//     count     item count        4
+//     nextId                      8
+//     reserved  zero-filled      12
+//   per item
+//     id                          8
+//     kind      ItemKind as u32   4
+//     flags     bit0 = pinned     4
+//     createdAt FILETIME          8
+//     usedAt    FILETIME          8
+//     imgW                        4
+//     imgH                        4
+//     order                       4
+//     dataLen                     4
+//     data      dataLen bytes
+//     appLen    sourceApp bytes   4
+//     sourceApp appLen bytes of UTF-16LE, no terminator
 std::vector<uint8_t> Store::Serialize() {
-    // v2 on-disk format always writes order field per-item.
     std::vector<uint8_t> buf;
     size_t estimate = kHeaderSize;
     for (const Item& item : items_) {
-        estimate += 48 + item.data.size();   // 44 original + 4 for order
+        estimate += 52 + item.data.size() + item.sourceApp.size() * sizeof(wchar_t);
     }
     buf.reserve(estimate);
 
@@ -1132,6 +774,10 @@ std::vector<uint8_t> Store::Serialize() {
         Append<uint32_t>(buf, item.order);
         Append<uint32_t>(buf, static_cast<uint32_t>(item.data.size()));
         buf.insert(buf.end(), item.data.begin(), item.data.end());
+        const size_t appBytes = item.sourceApp.size() * sizeof(wchar_t);
+        Append<uint32_t>(buf, static_cast<uint32_t>(appBytes));
+        const auto* app = reinterpret_cast<const uint8_t*>(item.sourceApp.data());
+        buf.insert(buf.end(), app, app + appBytes);
     }
     return buf;
 }

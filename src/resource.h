@@ -38,14 +38,28 @@
 #define IDC_FONT_RESET              1009
 #define IDC_DATADIR                 1010
 #define IDC_DATADIR_OPEN            1011
+#define IDC_HOVER_PREVIEW           1012
+#define IDC_MERGE_SEP               1013   // text-merge separator combo
+#define IDC_MERGE_SEP_CUSTOM        1014   // custom separator field, enabled only in Custom mode
 
 // Types page controls
 #define IDC_TYPELIST                1020
 #define IDC_TYPEDESC                1021
 
+// Privacy page controls
+#define IDC_BLOCKLIST               1030   // multiline per-app blocklist rules
+#define IDC_MASK_PHONE              1031   // preview desensitization toggles
+#define IDC_MASK_IDCARD             1032
+#define IDC_MASK_PASSWORD           1033
+#define IDC_MASK_EMAIL              1034
+#define IDC_MASK_APIKEY             1035
+
 // Shortcuts page controls
 #define IDC_POPUP_HK                1040
 #define IDC_POPUP_WIN               1041
+#define IDC_PASTE_KEY               1042   // Ctrl+V vs Shift+Insert combo
+#define IDC_QUEUE_HK                1043   // sequential paste-queue hotkey
+#define IDC_QUEUE_WIN               1044   // Win-key checkbox for the queue hotkey
 #define IDC_PIN_HK_BASE             1050   // 1050..1059
 #define IDC_PIN_WIN_BASE            1070   // 1070..1079
 

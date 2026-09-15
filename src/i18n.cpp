@@ -29,6 +29,8 @@ const Entry kDefaults[] = {
     {"tray.settings", L"Settings"},
     {"tray.autostart", L"Start with Windows"},
     {"tray.clear_history", L"Clear History (keep pinned)"},
+    {"tray.export_backup", L"Backup to File"},
+    {"tray.import_backup", L"Restore from File"},
     {"tray.about", L"About"},
     {"tray.exit", L"Exit"},
 
@@ -45,14 +47,54 @@ const Entry kDefaults[] = {
     {"popup.menu.unpin", L"Unpin"},
     {"popup.menu.delete", L"Delete"},
     {"popup.menu.to_plain", L"Convert to plain text"},
+    {"popup.menu.merge", L"Merge selected"},
+    {"popup.menu.add_queue", L"Add to paste queue"},
+    {"popup.menu.save_as", L"Save as File"},
+    {"popup.menu.reveal", L"Show in Explorer"},
+    {"popup.menu.paste_plain", L"Paste as plain text"},
+    {"popup.menu.copy_transformed", L"Copy transformed"},
+    {"popup.menu.paste_transformed", L"Paste transformed"},
+
+    // Text transforms. The two submenus above share these 13 labels, indexed by
+    // transform::Kind — keep this order in sync with the enum.
+    {"transform.trim", L"Trim whitespace"},
+    {"transform.remove_line_breaks", L"Remove line breaks"},
+    {"transform.one_line", L"One line between paragraphs"},
+    {"transform.two_lines", L"Blank line between paragraphs"},
+    {"transform.upper", L"UPPERCASE"},
+    {"transform.lower", L"lowercase"},
+    {"transform.capitalize", L"Capitalize Each Word"},
+    {"transform.sentence", L"Sentence case"},
+    {"transform.camel", L"camelCase"},
+    {"transform.invert", L"Invert case"},
+    {"transform.ascii", L"ASCII only"},
+    {"transform.slugify", L"Slugify"},
+    {"transform.datetime", L"Append date/time"},
 
     // Settings dialog
     {"settings.title", L"ClipWiz Settings"},
     {"settings.tab.general", L"General"},
     {"settings.tab.types", L"Supported Types"},
     {"settings.tab.shortcuts", L"Shortcuts"},
+    {"settings.tab.privacy", L"Privacy"},
+    {"settings.blocklist_hint",
+     L"Never record copies from these apps. One rule per line: a process name, path, or "
+     L"window title (* = wildcard). Prefix a line with ! to also ignore clipwiz hotkeys in "
+     L"that app. Lines starting with # are comments."},
+    {"settings.mask_hint",
+     L"Hide sensitive text in the list and the hover preview. What you paste is never "
+     L"changed — this only affects what is readable on screen. Each pattern is independent."},
+    {"settings.mask_phone", L"Mask phone numbers"},
+    {"settings.mask_idcard", L"Mask ID card numbers"},
+    {"settings.mask_password", L"Mask password-like text"},
+    {"settings.mask_email", L"Mask email addresses"},
+    {"settings.mask_apikey", L"Mask API keys / tokens"},
+    {"settings.merge_sep", L"Merge separator"},
+    {"settings.merge_sep_blank", L"Blank line"},
+    {"settings.merge_sep_newline", L"New line"},
+    {"settings.merge_sep_space", L"Space"},
+    {"settings.merge_sep_custom", L"Custom"},
     {"settings.autostart", L"Start with Windows"},
-    {"settings.autostart_yes", L"Yes"},
     {"settings.max_history", L"Max saved items:"},
     {"settings.expiry_days", L"Item expiry (days):"},
     {"settings.clean_on_exit", L"Clean on Exit"},
@@ -66,6 +108,7 @@ const Entry kDefaults[] = {
     {"settings.pos_mouse", L"At mouse pointer"},
     {"settings.pos_caret", L"At text cursor"},
     {"settings.pos_last", L"Last opened position"},
+    {"settings.hover_preview", L"Hover to preview"},
     {"settings.font", L"Display font:"},
     {"settings.font_default", L"Restore default"},
     {"settings.font_default_val", L"(System default)"},
@@ -75,8 +118,12 @@ const Entry kDefaults[] = {
     {"settings.open_dir", L"Open folder"},
     {"migrate.overwrite_confirm", L"Destination already has history data. Overwrite it?"},
     {"settings.popup_hotkey", L"Open quick paste:"},
+    {"settings.queue_hotkey", L"Paste next queued item:"},
+    // The two values this row offers are key names ("Ctrl+V", "Shift+Insert"),
+    // not prose — every locale spells them the same way, so they stay out of
+    // this table on purpose. Only the label is translated.
+    {"settings.paste_key", L"Paste keystroke:"},
     {"settings.pinned_group", L"Pinned item shortcuts"},
-    {"settings.position", L"Pos"},
     {"settings.win_key", L"Win"},
     {"settings.win_key_tip", L"Include the Windows key in this shortcut"},
     {"settings.ok", L"OK"},
@@ -101,15 +148,22 @@ const Entry kDefaults[] = {
      L"contents."},
 
     // Messages
-    {"msg.select_pinned", L"Please select a pinned item from the list first."},
     {"msg.confirm_delete_pinned", L"This item is pinned. Delete it permanently?"},
     {"msg.confirm_clear", L"Clear all non-pinned history?"},
     {"msg.hotkey_conflict", L"Hotkey registration failed for some shortcuts:"},
     {"msg.hotkey_suggest", L"Tip: Use Ctrl+Alt+number combinations to avoid conflicts."},
-    {"msg.save_failed", L"Failed to save data file. Check disk space and permissions."},
     {"msg.corrupt_found", L"Data file was corrupted and has been backed up. Starting fresh."},
+    {"msg.export_done", L"Backup saved to %s"},
+    {"msg.export_failed", L"Failed to write the backup file. Check disk space and permissions."},
+    {"msg.import_done", L"Imported %d item(s)."},
+    {"msg.import_failed",
+     L"This file is not a readable ClipWiz backup. Your current history was not changed."},
+    {"msg.save_done", L"Saved to %s"},
+    {"msg.save_as_failed", L"Failed to write the file. Check disk space and permissions."},
+    {"msg.reveal_failed", L"Could not open the file location in Explorer."},
     {"msg.need_modifier", L"At least one modifier key (Ctrl/Alt/Win) is required."},
     {"msg.same_as_popup", L"This combination is already used for opening the popup."},
+    {"msg.hotkey_duplicate", L"Two shortcuts use the same combination. Give each a different key."},
     {"msg.risky_ctrl_num",
      L"%s conflicts with browser/editor tab shortcuts. Use Ctrl+Alt+number instead."},
     {"msg.risky_ctrl_edit",
@@ -129,9 +183,6 @@ const Entry kDefaults[] = {
     // About
     {"about.text", L"ClipWiz %s\nLightweight clipboard history tool.\nData stored locally, nothing "
                    L"leaves your PC."},
-
-    // Hotkey dialog (deprecated, key kept for safety)
-    {"hotkey.clear", L"Unbind"},
 };
 
 // UTF-8 -> UTF-16

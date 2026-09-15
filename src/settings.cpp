@@ -210,6 +210,39 @@ void PopulateControls(HWND hwnd) {
     SendMessageW(cbPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.pos_caret")));
     SendMessageW(cbPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::T("settings.pos_last")));
     SendMessageW(cbPos, CB_SETCURSEL, cfg.popupPosition, 0);
+    // Shares the row with the position combo, the way "Clean on Exit" shares
+    // the expiry-days row: both are one-checkbox popup behaviours and giving
+    // each its own row would stretch the dialog for a single tick box.
+    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.hover_preview"),
+             BS_AUTOCHECKBOX | WS_TABSTOP,
+             kFieldX + kFieldW + 6, y + kCheckboxOffsetY, 150, kCheckboxH, IDC_HOVER_PREVIEW);
+    if (cfg.hoverPreview)
+        CheckDlgButton(hwnd, IDC_HOVER_PREVIEW, BST_CHECKED);
+    y += kRowH;
+
+    // Merge separator: what goes between two text items combined into one. File
+    // lists ignore this and always join on a newline (their format is fixed), so
+    // it only governs text merges. Choosing "Custom" enables the field beside the
+    // combo; the other three presets carry their own literal separator.
+    MakeLabel(hwnd, i18n::T("settings.merge_sep"), kPad, y + 2, kLabelW, 16);
+    HWND cbMerge = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                            CBS_DROPDOWNLIST | WS_TABSTOP,
+                            kFieldX, y, kFieldW, 120, IDC_MERGE_SEP);
+    SendMessageW(cbMerge, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.merge_sep_blank")));
+    SendMessageW(cbMerge, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.merge_sep_newline")));
+    SendMessageW(cbMerge, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.merge_sep_space")));
+    SendMessageW(cbMerge, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(i18n::T("settings.merge_sep_custom")));
+    SendMessageW(cbMerge, CB_SETCURSEL, static_cast<int>(cfg.mergeSep), 0);
+    MakeCtrl(hwnd, L"EDIT", cfg.mergeSepCustom.c_str(),
+             ES_AUTOHSCROLL | WS_TABSTOP,
+             kFieldX + kFieldW + 6, y, kActionBtnW + 40, kEditH, IDC_MERGE_SEP_CUSTOM,
+             WS_EX_CLIENTEDGE);
+    EnableWindow(GetDlgItem(hwnd, IDC_MERGE_SEP_CUSTOM),
+                 cfg.mergeSep == merge::Separator::Custom);
     y += kRowH;
 
     // Data storage location
@@ -251,7 +284,29 @@ void PopulateControls(HWND hwnd) {
                        (hotkey::ModsOf(cfg.popupHotkey) & MOD_WIN) != 0);
     y += kHkRowH + 6;
 
-    // Pinned item shortcuts label
+    // Paste-queue hotkey: each press pastes the next queued item. Sits right
+    // under the popup hotkey because both are global action chords (the pinned
+    // hotkeys below are positional).
+    MakeLabel(hwnd, i18n::T("settings.queue_hotkey"), kPad, y + 2, kLabelW, 16);
+    HWND hkQueue = MakeCtrl(hwnd, HOTKEY_CLASSW, L"",
+                            WS_TABSTOP,
+                            kFieldX, y, kFieldW, kEditH, IDC_QUEUE_HK, WS_EX_CLIENTEDGE);
+    SendMessageW(hkQueue, HKM_SETHOTKEY, hotkey::ToControl(cfg.queueHotkey), 0);
+    MakeWinKeyCheckbox(hwnd, kFieldX + kFieldW + 6, y + kCheckboxOffsetY,
+                       kWinCheckboxW, kCheckboxH, IDC_QUEUE_WIN,
+                       (hotkey::ModsOf(cfg.queueHotkey) & MOD_WIN) != 0);
+    y += kHkRowH + 6;
+
+    // Paste keystroke. The two entries are key names, not prose — every locale
+    // writes them the same way — so they are not run through i18n.
+    MakeLabel(hwnd, i18n::T("settings.paste_key"), kPad, y + 2, kLabelW, 16);
+    HWND cbPasteKey = MakeCtrl(hwnd, L"COMBOBOX", L"",
+                               CBS_DROPDOWNLIST | WS_TABSTOP,
+                               kFieldX, y, kFieldW, 120, IDC_PASTE_KEY);
+    SendMessageW(cbPasteKey, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Ctrl+V"));
+    SendMessageW(cbPasteKey, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Shift+Insert"));
+    SendMessageW(cbPasteKey, CB_SETCURSEL, static_cast<int>(cfg.pasteKey), 0);
+    y += kRowH + 6;
     MakeLabel(hwnd, i18n::T("settings.pinned_group"), kPad, y, 220, 16);
     y += 20;
 
@@ -277,6 +332,52 @@ void PopulateControls(HWND hwnd) {
                            (hotkey::ModsOf(cfg.pinnedHotkeys[i]) & MOD_WIN) != 0);
     }
     y += 5 * kHkRowH + 10;
+
+    // ===================== Section 3: Privacy =====================
+    y = MakeGroupHeader(hwnd, i18n::T("settings.tab.privacy"), y, kGroupW);
+
+    // One rule per line; a leading '!' means "also ignore hotkeys here", '*' is
+    // a wildcard, '#' starts a comment. The hint states exactly that so the box
+    // is usable without opening the docs.
+    MakeLabel(hwnd, i18n::T("settings.blocklist_hint"), kPad, y, kGroupW - 20, 46);
+    y += 48;
+
+    HWND edBlock = MakeCtrl(hwnd, L"EDIT", L"",
+                            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP,
+                            kPad, y, kGroupW - 20, 100, IDC_BLOCKLIST, WS_EX_CLIENTEDGE);
+    // Stored form is LF; a multiline edit control wants CRLF to show line breaks.
+    {
+        std::wstring text;
+        text.reserve(cfg.blockRules.size() + 16);
+        for (wchar_t c : cfg.blockRules) {
+            if (c == L'\n') {
+                text += L"\r\n";
+            } else if (c != L'\r') {
+                text += c;
+            }
+        }
+        SetWindowTextW(edBlock, text.c_str());
+    }
+    y += 100 + kPad;
+
+    // Preview desensitization: hide sensitive spans in the list and the hover
+    // preview. Five independent toggles in a two-column grid. What actually gets
+    // pasted is never changed — this only governs what is readable on screen.
+    // The defaults (phone / ID / password on) come from mask::Config.
+    MakeLabel(hwnd, i18n::T("settings.mask_hint"), kPad, y, kGroupW - 20, 30);
+    y += 32;
+    const int kMaskColW = (kGroupW - 20) / 2;
+    auto maskCheck = [&](int col, int row, int id, const wchar_t* label, bool on) {
+        MakeCtrl(hwnd, L"BUTTON", label, BS_AUTOCHECKBOX | WS_TABSTOP,
+                 kPad + col * kMaskColW, y + row * 22, kMaskColW - 6, 16, id);
+        if (on) CheckDlgButton(hwnd, id, BST_CHECKED);
+    };
+    maskCheck(0, 0, IDC_MASK_PHONE,    i18n::T("settings.mask_phone"),    cfg.mask.phone);
+    maskCheck(1, 0, IDC_MASK_IDCARD,   i18n::T("settings.mask_idcard"),   cfg.mask.idCard);
+    maskCheck(0, 1, IDC_MASK_PASSWORD, i18n::T("settings.mask_password"), cfg.mask.password);
+    maskCheck(1, 1, IDC_MASK_EMAIL,    i18n::T("settings.mask_email"),    cfg.mask.email);
+    maskCheck(0, 2, IDC_MASK_APIKEY,   i18n::T("settings.mask_apikey"),   cfg.mask.apiKey);
+    y += 3 * 22 + kPad;
 
     // ===================== Footer: OK / Cancel =====================
     int btnW = 85;
@@ -304,6 +405,73 @@ void PopulateControls(HWND hwnd) {
     SetWindowPos(hwnd, nullptr, screenCx, screenCy, dlgW, dlgH, SWP_NOZORDER);
 }
 
+// Validate the shortcuts before any of them is committed. The OK handler reads
+// the controls into locals and calls this first: cfg aliases the live global
+// config, so a hotkey that fails here must never reach it. An unbound slot
+// (vk == 0) is allowed and skipped; a bound one must carry a real modifier, must
+// not be a combination other programs depend on, and must not collide with the
+// popup hotkey. On the first problem this shows why and returns false so the
+// dialog stays open for the user to fix it — nothing has been written yet.
+bool HotkeysAcceptable(HWND hwnd, uint32_t popup, uint32_t queue,
+                       const uint32_t (&pinned)[10]) {
+    const wchar_t* title = i18n::T("settings.title");
+    const uint32_t all[12] = {popup,     queue,     pinned[0], pinned[1], pinned[2],
+                              pinned[3], pinned[4], pinned[5], pinned[6], pinned[7],
+                              pinned[8], pinned[9]};
+    for (uint32_t code : all) {
+        if (hotkey::VkOf(code) == 0) {
+            continue;  // unbound — nothing to register, nothing to reject
+        }
+        if (!hotkey::IsUsable(code)) {
+            MessageBoxW(hwnd, i18n::T("msg.need_modifier"), title, MB_OK | MB_ICONEXCLAMATION);
+            return false;
+        }
+        std::wstring why;
+        if (hotkey::LooksRisky(code, why)) {
+            MessageBoxW(hwnd, why.c_str(), title, MB_OK | MB_ICONEXCLAMATION);
+            return false;
+        }
+    }
+    // The popup hotkey is the anchor: nothing else may reuse it or the press
+    // would be ambiguous. Only meaningful when the popup slot is bound.
+    if (hotkey::VkOf(popup) != 0) {
+        if (queue == popup) {
+            MessageBoxW(hwnd, i18n::T("msg.same_as_popup"), title, MB_OK | MB_ICONEXCLAMATION);
+            return false;
+        }
+        for (uint32_t code : pinned) {
+            if (code == popup) {
+                MessageBoxW(hwnd, i18n::T("msg.same_as_popup"), title, MB_OK | MB_ICONEXCLAMATION);
+                return false;
+            }
+        }
+    }
+    // Any other duplicate pair is ambiguous too: the queue slot against a pinned
+    // slot, or two pinned slots sharing one combination. Collisions with the
+    // popup are already caught above with a more specific message. Unbound slots
+    // (vk == 0) are skipped so the empty pinned positions don't match each other.
+    if (hotkey::VkOf(queue) != 0) {
+        for (uint32_t code : pinned) {
+            if (code == queue) {
+                MessageBoxW(hwnd, i18n::T("msg.hotkey_duplicate"), title, MB_OK | MB_ICONEXCLAMATION);
+                return false;
+            }
+        }
+    }
+    for (int i = 0; i < 10; ++i) {
+        if (hotkey::VkOf(pinned[i]) == 0) {
+            continue;
+        }
+        for (int j = i + 1; j < 10; ++j) {
+            if (pinned[j] == pinned[i]) {
+                MessageBoxW(hwnd, i18n::T("msg.hotkey_duplicate"), title, MB_OK | MB_ICONEXCLAMATION);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     (void)lparam;
     switch (msg) {
@@ -315,9 +483,38 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             int id = LOWORD(wparam);
             if (id == IDOK) {
                 Config& cfg = *g_cfg;
+                // Shortcuts are read into locals and validated before ANY field is
+                // committed. cfg aliases the live global config, so a rejected
+                // hotkey must not reach it — and neither should the other edits in
+                // this dialog. On failure keep the dialog open (return TRUE) with
+                // cfg untouched so the user can fix the combination.
+                WORD raw = static_cast<WORD>(
+                    SendDlgItemMessageW(hwnd, IDC_POPUP_HK, HKM_GETHOTKEY, 0, 0));
+                bool win = IsDlgButtonChecked(hwnd, IDC_POPUP_WIN) == BST_CHECKED;
+                uint32_t popupHk = hotkey::FromControl(raw, win);
+                WORD qraw = static_cast<WORD>(
+                    SendDlgItemMessageW(hwnd, IDC_QUEUE_HK, HKM_GETHOTKEY, 0, 0));
+                bool qwin = IsDlgButtonChecked(hwnd, IDC_QUEUE_WIN) == BST_CHECKED;
+                uint32_t queueHk = hotkey::FromControl(qraw, qwin);
+                uint32_t pinnedHk[10] = {};
+                for (int i = 0; i < 10; ++i) {
+                    WORD r = static_cast<WORD>(
+                        SendDlgItemMessageW(hwnd, IDC_PIN_HK_BASE + i, HKM_GETHOTKEY, 0, 0));
+                    bool w = IsDlgButtonChecked(hwnd, IDC_PIN_WIN_BASE + i) == BST_CHECKED;
+                    pinnedHk[i] = hotkey::FromControl(r, w);
+                }
+                if (!HotkeysAcceptable(hwnd, popupHk, queueHk, pinnedHk)) {
+                    return TRUE;
+                }
+                cfg.popupHotkey = popupHk;
+                cfg.queueHotkey = queueHk;
+                for (int i = 0; i < 10; ++i) {
+                    cfg.pinnedHotkeys[i] = pinnedHk[i];
+                }
                 cfg.maxHistory = GetDlgItemInt(hwnd, IDC_MAXHISTORY, nullptr, FALSE);
                 cfg.expiryDays = GetDlgItemInt(hwnd, IDC_EXPIRYDAYS, nullptr, FALSE);
                 cfg.cleanOnExit = IsDlgButtonChecked(hwnd, IDC_CLEAN_ON_EXIT) == BST_CHECKED;
+                cfg.hoverPreview = IsDlgButtonChecked(hwnd, IDC_HOVER_PREVIEW) == BST_CHECKED;
                 int langSel = static_cast<int>(
                     SendMessageW(GetDlgItem(hwnd, IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
                 if (langSel == 1) cfg.language = L"en";
@@ -328,17 +525,42 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 cfg.popupPosition = static_cast<int>(
                     SendMessageW(GetDlgItem(hwnd, IDC_POPUPPOS), CB_GETCURSEL, 0, 0));
                 bool autostart = IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED;
-                // Shortcuts
-                WORD raw = static_cast<WORD>(
-                    SendDlgItemMessageW(hwnd, IDC_POPUP_HK, HKM_GETHOTKEY, 0, 0));
-                bool win = IsDlgButtonChecked(hwnd, IDC_POPUP_WIN) == BST_CHECKED;
-                cfg.popupHotkey = hotkey::FromControl(raw, win);
-                for (int i = 0; i < 10; ++i) {
-                    WORD r = static_cast<WORD>(
-                        SendDlgItemMessageW(hwnd, IDC_PIN_HK_BASE + i, HKM_GETHOTKEY, 0, 0));
-                    bool w = IsDlgButtonChecked(hwnd, IDC_PIN_WIN_BASE + i) == BST_CHECKED;
-                    cfg.pinnedHotkeys[i] = hotkey::FromControl(r, w);
+                // CB_GETCURSEL returns -1 when nothing is selected; Clamp()
+                // turns that back into the default rather than storing it.
+                cfg.pasteKey = static_cast<paste::Key>(
+                    SendMessageW(GetDlgItem(hwnd, IDC_PASTE_KEY), CB_GETCURSEL, 0, 0));
+                // Blocklist rules: strip the CR the edit control adds, store LF.
+                {
+                    HWND edBlock = GetDlgItem(hwnd, IDC_BLOCKLIST);
+                    const int len = GetWindowTextLengthW(edBlock);
+                    std::wstring text;
+                    if (len > 0) {
+                        text.resize(static_cast<size_t>(len) + 1);
+                        GetWindowTextW(edBlock, text.data(), len + 1);
+                        text.resize(static_cast<size_t>(len));
+                    }
+                    std::wstring lf;
+                    lf.reserve(text.size());
+                    for (wchar_t c : text) {
+                        if (c != L'\r') lf += c;
+                    }
+                    cfg.blockRules = lf;
                 }
+                // Preview desensitization toggles
+                cfg.mask.phone = IsDlgButtonChecked(hwnd, IDC_MASK_PHONE) == BST_CHECKED;
+                cfg.mask.idCard = IsDlgButtonChecked(hwnd, IDC_MASK_IDCARD) == BST_CHECKED;
+                cfg.mask.password = IsDlgButtonChecked(hwnd, IDC_MASK_PASSWORD) == BST_CHECKED;
+                cfg.mask.email = IsDlgButtonChecked(hwnd, IDC_MASK_EMAIL) == BST_CHECKED;
+                cfg.mask.apiKey = IsDlgButtonChecked(hwnd, IDC_MASK_APIKEY) == BST_CHECKED;
+                // Merge separator: mode from the combo, literal from the custom
+                // field. CB_GETCURSEL is -1 if nothing is selected; Clamp()
+                // restores the default. The custom edit is single-line, so there
+                // is no CR to strip and nothing that could break the ini format.
+                cfg.mergeSep = static_cast<merge::Separator>(
+                    SendDlgItemMessageW(hwnd, IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
+                wchar_t mergeCustom[64] = {};
+                GetDlgItemTextW(hwnd, IDC_MERGE_SEP_CUSTOM, mergeCustom, 64);
+                cfg.mergeSepCustom = mergeCustom;
                 // Data storage mode migration (must succeed before committing)
                 int dataSel = static_cast<int>(
                     SendDlgItemMessageW(hwnd, IDC_DATADIR, CB_GETCURSEL, 0, 0));
@@ -407,6 +629,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 EnableWindow(GetDlgItem(hwnd, IDC_EXPIRYDAYS), !checked);
                 return TRUE;
             }
+            if (id == IDC_MERGE_SEP) {
+                // The custom field is only meaningful in Custom mode; grey it out
+                // for the three presets so it is clear their separator is fixed.
+                const int sel = static_cast<int>(
+                    SendDlgItemMessageW(hwnd, IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
+                EnableWindow(GetDlgItem(hwnd, IDC_MERGE_SEP_CUSTOM),
+                             sel == static_cast<int>(merge::Separator::Custom));
+                return TRUE;
+            }
             break;
         }
         case WM_CLOSE:
@@ -455,6 +686,7 @@ std::vector<WORD> BuildEmptyDlgTemplate() {
 Config Defaults() {
     Config cfg;
     cfg.popupHotkey = hotkey::Make(MOD_CONTROL | MOD_ALT, 'K');
+    cfg.queueHotkey = hotkey::Make(MOD_CONTROL | MOD_ALT, 'J');
     cfg.pinnedHotkeys[0] = hotkey::Make(MOD_CONTROL | MOD_ALT, '1');
     cfg.pinnedHotkeys[1] = hotkey::Make(MOD_CONTROL | MOD_ALT, '2');
     cfg.expiryDays = 5;
@@ -466,6 +698,12 @@ void Clamp(Config& cfg) {
     cfg.maxHistory = std::clamp(cfg.maxHistory, 5, 9999);
     cfg.expiryDays = std::clamp(cfg.expiryDays, 0, 3650);
     cfg.pasteDelayMs = std::clamp(cfg.pasteDelayMs, 0, 2000);
+    // A value out of range here would make Execute() fall through to its
+    // default, which hides a corrupt config.ini behind working behaviour.
+    // Reset it explicitly so what is saved is what runs.
+    if (cfg.pasteKey != paste::Key::CtrlV && cfg.pasteKey != paste::Key::ShiftInsert) {
+        cfg.pasteKey = paste::Key::CtrlV;
+    }
     cfg.rowsVisible = std::clamp(cfg.rowsVisible, 4, 25);
     cfg.popupPosition = std::clamp(cfg.popupPosition, 0, 2);
     if (cfg.maxTextBytes < 1024u) cfg.maxTextBytes = 1024u;
@@ -474,6 +712,14 @@ void Clamp(Config& cfg) {
     cfg.largeItemThresholdMB = std::clamp(cfg.largeItemThresholdMB, 1, 500);
     if (cfg.fontSize > 0) cfg.fontSize = std::clamp(cfg.fontSize, 8, 28);
     if (!cfg.fontName.empty() && cfg.fontName.front() == L'@') cfg.fontName.erase(cfg.fontName.begin());
+    // A hand-edited MergeSep could name a separator that does not exist; fall
+    // back to the default rather than carry an out-of-range enum into the UI.
+    if (cfg.mergeSep != merge::Separator::BlankLine &&
+        cfg.mergeSep != merge::Separator::Newline &&
+        cfg.mergeSep != merge::Separator::Space &&
+        cfg.mergeSep != merge::Separator::Custom) {
+        cfg.mergeSep = merge::Separator::BlankLine;
+    }
 }
 
 void Load(Config& cfg) {
@@ -503,8 +749,13 @@ void Load(Config& cfg) {
     cfg.maxHistory = getInt("MaxHistory", cfg.maxHistory);
     cfg.expiryDays = getInt("ExpiryDays", cfg.expiryDays);
     cfg.pasteDelayMs = getInt("PasteDelayMs", cfg.pasteDelayMs);
+    cfg.pasteKey = static_cast<paste::Key>(getInt("PasteKey", static_cast<int>(cfg.pasteKey)));
     cfg.rowsVisible = getInt("RowsVisible", cfg.rowsVisible);
     cfg.popupPosition = getInt("PopupPosition", cfg.popupPosition);
+    // Defaults to 1, not 0: a config.ini written before this option existed has
+    // no HoverPreview line, and the behaviour it describes is the one those
+    // users are getting for the first time. Absent means "on".
+    cfg.hoverPreview = getInt("HoverPreview", 1) != 0;
     cfg.theme = static_cast<ThemeMode>(getInt("Theme", 0));
     cfg.maxTextBytes = static_cast<uint32_t>(
         getInt("MaxTextBytes", static_cast<int>(cfg.maxTextBytes)));
@@ -517,6 +768,9 @@ void Load(Config& cfg) {
     std::string hk = getStr("PopupHotkey");
     if (!hk.empty())
         cfg.popupHotkey = static_cast<uint32_t>(std::strtoul(hk.c_str(), nullptr, 10));
+    std::string qhk = getStr("QueueHotkey");
+    if (!qhk.empty())
+        cfg.queueHotkey = static_cast<uint32_t>(std::strtoul(qhk.c_str(), nullptr, 10));
     for (int i = 0; i < 10; ++i) {
         char key[32];
         std::snprintf(key, sizeof(key), "PinnedHotkey%d", i);
@@ -528,6 +782,43 @@ void Load(Config& cfg) {
     cfg.fontSize = getInt("FontSize", 0);
     cfg.cleanOnExit = getInt("CleanOnExit", 0) != 0;
     cfg.logLevel = Widen(getStr("LogLevel"));
+
+    // Blocklist rules are stored one line per key behind an explicit count, so
+    // blank lines and '#' comments in the user's list survive a round trip. The
+    // count is what tells Load when to stop; an empty value is a real blank
+    // line, not the end of the list.
+    const int ruleCount = getInt("BlockRuleCount", 0);
+    if (ruleCount > 0) {
+        std::wstring rules;
+        for (int i = 0; i < ruleCount; ++i) {
+            char key[32];
+            std::snprintf(key, sizeof(key), "BlockRule%d", i);
+            if (i > 0) rules += L'\n';
+            rules += Widen(getStr(key));
+        }
+        cfg.blockRules = rules;
+    }
+
+    // Preview desensitization toggles. An absent key keeps the Defaults() value
+    // (phone / ID / password on, email / API-key off), so a config.ini written
+    // before this feature existed behaves exactly as the defaults specify.
+    cfg.mask.phone = getInt("MaskPhone", cfg.mask.phone ? 1 : 0) != 0;
+    cfg.mask.idCard = getInt("MaskIdCard", cfg.mask.idCard ? 1 : 0) != 0;
+    cfg.mask.password = getInt("MaskPassword", cfg.mask.password ? 1 : 0) != 0;
+    cfg.mask.email = getInt("MaskEmail", cfg.mask.email ? 1 : 0) != 0;
+    cfg.mask.apiKey = getInt("MaskApiKey", cfg.mask.apiKey ? 1 : 0) != 0;
+
+    // Merge separator. An absent MergeSep keeps the Defaults() value (blank
+    // line); MergeSepCustom is read verbatim (single-line, so no CR to strip).
+    cfg.mergeSep = static_cast<merge::Separator>(
+        getInt("MergeSep", static_cast<int>(cfg.mergeSep)));
+    cfg.mergeSepCustom = Widen(getStr("MergeSepCustom"));
+
+    // Slug separator for the Slugify transform. Absent or empty keeps the
+    // Defaults() value ("-"); transform::Slugify also falls back to "-", so a
+    // blank separator can never silently glue words together.
+    const std::string slug = getStr("SlugSep");
+    if (!slug.empty()) cfg.slugSep = Widen(slug);
 }
 
 bool Save(const Config& cfg) {
@@ -535,8 +826,10 @@ bool Save(const Config& cfg) {
     ini += "MaxHistory=" + std::to_string(cfg.maxHistory) + "\n";
     ini += "ExpiryDays=" + std::to_string(cfg.expiryDays) + "\n";
     ini += "PasteDelayMs=" + std::to_string(cfg.pasteDelayMs) + "\n";
+    ini += "PasteKey=" + std::to_string(static_cast<int>(cfg.pasteKey)) + "\n";
     ini += "RowsVisible=" + std::to_string(cfg.rowsVisible) + "\n";
     ini += "PopupPosition=" + std::to_string(cfg.popupPosition) + "\n";
+    ini += "HoverPreview=" + std::string(cfg.hoverPreview ? "1" : "0") + "\n";
     ini += "Theme=" + std::to_string(static_cast<int>(cfg.theme)) + "\n";
     ini += "MaxTextBytes=" + std::to_string(cfg.maxTextBytes) + "\n";
     ini += "MaxImagePixels=" + std::to_string(cfg.maxImagePixels) + "\n";
@@ -544,6 +837,7 @@ bool Save(const Config& cfg) {
     ini += "LastPopupX=" + std::to_string(cfg.lastPopupX) + "\n";
     ini += "LastPopupY=" + std::to_string(cfg.lastPopupY) + "\n";
     ini += "PopupHotkey=" + std::to_string(cfg.popupHotkey) + "\n";
+    ini += "QueueHotkey=" + std::to_string(cfg.queueHotkey) + "\n";
     ini += "CleanOnExit=" + std::string(cfg.cleanOnExit ? "1" : "0") + "\n";
     for (int i = 0; i < 10; ++i) {
         if (cfg.pinnedHotkeys[i] != 0)
@@ -554,6 +848,50 @@ bool Save(const Config& cfg) {
     if (cfg.fontSize > 0) ini += "FontSize=" + std::to_string(cfg.fontSize) + "\n";
     if (!cfg.fontName.empty()) ini += "FontName=" + Narrow(cfg.fontName) + "\n";
     if (!cfg.logLevel.empty()) ini += "LogLevel=" + Narrow(cfg.logLevel) + "\n";
+
+    // One key per rule line, behind a count. Splitting on '\n' and dropping any
+    // trailing '\r' normalizes the CRLF a multiline edit control hands back,
+    // so the stored form is always LF and round-trips through Load unchanged.
+    {
+        const std::string s = Narrow(cfg.blockRules);
+        std::vector<std::string> lines;
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            const size_t eol = s.find('\n', pos);
+            std::string line = s.substr(pos, eol == std::string::npos ? std::string::npos
+                                                                     : eol - pos);
+            while (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+            if (eol == std::string::npos) break;
+            pos = eol + 1;
+        }
+        while (!lines.empty() && lines.back().empty()) lines.pop_back();
+        if (!lines.empty()) {
+            ini += "BlockRuleCount=" + std::to_string(lines.size()) + "\n";
+            for (size_t i = 0; i < lines.size(); ++i) {
+                ini += "BlockRule" + std::to_string(i) + "=" + lines[i] + "\n";
+            }
+        }
+    }
+
+    // Preview desensitization toggles, always written so a round trip is exact.
+    ini += "MaskPhone=" + std::string(cfg.mask.phone ? "1" : "0") + "\n";
+    ini += "MaskIdCard=" + std::string(cfg.mask.idCard ? "1" : "0") + "\n";
+    ini += "MaskPassword=" + std::string(cfg.mask.password ? "1" : "0") + "\n";
+    ini += "MaskEmail=" + std::string(cfg.mask.email ? "1" : "0") + "\n";
+    ini += "MaskApiKey=" + std::string(cfg.mask.apiKey ? "1" : "0") + "\n";
+
+    // Merge separator: the mode as an int, plus the custom string when set. The
+    // custom field is a single-line edit, so it never holds a newline that could
+    // break the key=value format — no escaping needed.
+    ini += "MergeSep=" + std::to_string(static_cast<int>(cfg.mergeSep)) + "\n";
+    if (!cfg.mergeSepCustom.empty())
+        ini += "MergeSepCustom=" + Narrow(cfg.mergeSepCustom) + "\n";
+
+    // Slugify separator, written only when it differs from the "-" default so a
+    // stock config.ini stays uncluttered. Single-line, so no escaping needed.
+    if (!cfg.slugSep.empty() && cfg.slugSep != L"-")
+        ini += "SlugSep=" + Narrow(cfg.slugSep) + "\n";
     return util::WriteFileAtomic(util::ConfigPath(), ini.data(), ini.size());
 }
 

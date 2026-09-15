@@ -12,8 +12,10 @@
 
 namespace hotkey {
 
-// Popup uses fixed ID 1; pinned items start at 1000, sequential
+// Popup uses fixed ID 1, the sequential paste-queue hotkey ID 2; pinned items
+// start at 1000, sequential.
 constexpr int kIdPopup = 1;
+constexpr int kIdPasteQueue = 2;
 constexpr int kIdItemBase = 1000;
 
 inline uint32_t Make(uint32_t mods, uint32_t vk) {

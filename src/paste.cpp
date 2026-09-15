@@ -104,6 +104,12 @@ void SendKey(WORD vk, bool down) {
 
 // Hotkey is triggered with modifier keys held; Ctrl/Alt/Shift/Win are still physically down.
 // Must release them first, otherwise Ctrl+V would become Ctrl+Alt+V or similar.
+//
+// This deliberately stays virtual-key based while the paste chord below is
+// scan-code based: the job here is to lift a modifier the user is physically
+// holding, and only the VK identifies which one. A scan code cannot tell left
+// from right without the extended flag, and getting that wrong would leave a
+// modifier stuck down.
 void ReleaseHeldModifiers() {
     static const WORD kMods[] = {VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU,
                                  VK_LSHIFT,   VK_RSHIFT,   VK_LWIN,  VK_RWIN};
@@ -112,6 +118,68 @@ void ReleaseHeldModifiers() {
             SendKey(vk, false);
         }
     }
+}
+
+struct ScanKey {
+    WORD scan = 0;
+    bool extended = false;  // E0-prefixed, e.g. Insert
+};
+
+// Resolve a virtual key to the physical key that produces it under the current
+// keyboard layout.
+//
+// MAPVK_VK_TO_VSC gives the scan code but hides whether the key is extended,
+// and VK_INSERT is: injecting its 0x52 without KEYEVENTF_EXTENDEDKEY arrives as
+// a different key entirely. MAPVK_VK_TO_VSC_EX reports the prefix in bits
+// 0xE000, so extended-ness is derived rather than hardcoded per key.
+ScanKey MakeScanKey(WORD vk) {
+    const UINT mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX);
+    ScanKey out;
+    out.scan = static_cast<WORD>(mapped & 0xFFu);
+    out.extended = (mapped & 0xE000u) != 0;
+    return out;
+}
+
+// Inject a two-key chord: modifier down, key down, key up, modifier up. All
+// four go out in one SendInput call so a real keystroke cannot land in the
+// middle of the chord.
+//
+// Scan codes rather than virtual keys. An event carrying only wVk has no
+// hardware scan code, and a surprising number of receivers discard those: RDP
+// and other remote stacks, virtual machines, raw-input readers, and edit
+// controls that use the scan code to tell left from right modifiers. With wVk
+// set to zero and KEYEVENTF_SCANCODE, the event is indistinguishable from a
+// real keypress at every layer above the driver.
+bool SendChord(WORD modVk, WORD keyVk) {
+    const ScanKey mod = MakeScanKey(modVk);
+    const ScanKey key = MakeScanKey(keyVk);
+
+    // A layout that cannot map one of these falls back to the virtual-key form.
+    // That form is what remote desktops tend to drop, but it still works
+    // locally, and a paste that reaches most apps beats one that silently
+    // reaches none.
+    const bool byScan = (mod.scan != 0 && key.scan != 0);
+
+    const WORD vks[4] = {modVk, keyVk, keyVk, modVk};
+    const ScanKey chord[4] = {mod, key, key, mod};
+
+    INPUT keys[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        keys[i].type = INPUT_KEYBOARD;
+        keys[i].ki.wScan = chord[i].scan;
+        if (byScan) {
+            keys[i].ki.wVk = 0;
+            keys[i].ki.dwFlags = KEYEVENTF_SCANCODE |
+                                 (chord[i].extended ? KEYEVENTF_EXTENDEDKEY : 0u);
+        } else {
+            keys[i].ki.wVk = vks[i];
+            keys[i].ki.dwFlags = 0;
+        }
+        if (i >= 2) {
+            keys[i].ki.dwFlags |= KEYEVENTF_KEYUP;
+        }
+    }
+    return SendInput(4, keys, sizeof(INPUT)) == 4;
 }
 
 }  // namespace
@@ -148,7 +216,7 @@ HWND Target() {
     return nullptr;
 }
 
-bool Execute(int delayMs) {
+bool Execute(int delayMs, Key key) {
     HWND target = Target();
     if (!target) {
         return false;
@@ -166,20 +234,13 @@ bool Execute(int delayMs) {
 
     ReleaseHeldModifiers();
 
-    INPUT keys[4] = {};
-    for (INPUT& key : keys) {
-        key.type = INPUT_KEYBOARD;
+    switch (key) {
+        case Key::ShiftInsert:
+            return SendChord(VK_SHIFT, VK_INSERT);
+        case Key::CtrlV:
+            return SendChord(VK_CONTROL, 'V');
     }
-    keys[0].ki.wVk = VK_CONTROL;
-    keys[1].ki.wVk = 'V';
-    keys[2].ki.wVk = 'V';
-    keys[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    keys[3].ki.wVk = VK_CONTROL;
-    keys[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    for (INPUT& key : keys) {
-        key.ki.wScan = static_cast<WORD>(MapVirtualKeyW(key.ki.wVk, MAPVK_VK_TO_VSC));
-    }
-    return SendInput(4, keys, sizeof(INPUT)) == 4;
+    return SendChord(VK_CONTROL, 'V');
 }
 
 }  // namespace paste

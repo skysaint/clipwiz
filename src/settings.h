@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <string>
 
+#include "mask.h"
+#include "merge.h"
+#include "paste.h"
 #include "store.h"
 
 namespace settings {
@@ -17,12 +20,15 @@ struct Config {
     int expiryDays = 0;              // 0 = never expire
     bool cleanOnExit = false;        // Clean non-pinned items on exit
     uint32_t popupHotkey = 0;        // default Ctrl+Alt+K, see Defaults()
+    uint32_t queueHotkey = 0;        // default Ctrl+Alt+J, pops the paste queue; see Defaults()
     uint32_t pinnedHotkeys[10] = {}; // positional: hotkey for the Nth pinned item
     int pasteDelayMs = 60;
+    paste::Key pasteKey = paste::Key::CtrlV;  // Which chord Execute() injects
     ThemeMode theme = ThemeMode::Auto;
     int rowsVisible = 10;
     std::wstring language;           // empty = English, "zh-CN" = Simplified Chinese
     int popupPosition = 0;           // 0=mouse 1=caret 2=last position
+    bool hoverPreview = true;        // Preview a row after the mouse rests on it
     int lastPopupX = -1;
     int lastPopupY = -1;
     std::wstring fontName;           // empty = system default
@@ -31,6 +37,11 @@ struct Config {
     uint32_t maxImagePixels = 33177600u;
     int largeItemThresholdMB = 10;  // threshold for large-item cleanup
     std::wstring logLevel;           // empty = default error
+    std::wstring blockRules;         // multiline, one rule per line; see blocklist::Parse
+    mask::Config mask;               // which sensitive patterns to hide in previews
+    merge::Separator mergeSep = merge::Separator::BlankLine;  // text-merge join
+    std::wstring mergeSepCustom;     // literal join string, used only when mergeSep == Custom
+    std::wstring slugSep = L"-";     // Slugify transform word separator (config.ini only, no dialog field)
 };
 
 Config Defaults();

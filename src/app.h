@@ -4,12 +4,15 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "asyncwriter.h"
+#include "blocklist.h"
 #include "hotkey.h"
 #include "popup.h"
 #include "settings.h"
 #include "store.h"
+#include "transform.h"
 #include "util.h"
 
 UINT SingleInstanceMessage();
@@ -24,6 +27,8 @@ public:
     const util::Theme& GetTheme() const override { return theme_; }
     int RowsVisible() const override { return cfg_.rowsVisible; }
     int PopupPosition() const override { return cfg_.popupPosition; }
+    bool HoverPreview() const override { return cfg_.hoverPreview; }
+    const mask::Config& MaskConfig() const override { return cfg_.mask; }
     const std::wstring& PopupFontName() const override { return cfg_.fontName; }
     int PopupFontSize() const override { return cfg_.fontSize; }
     void GetLastPos(int& x, int& y) const override { x = cfg_.lastPopupX; y = cfg_.lastPopupY; }
@@ -35,6 +40,13 @@ public:
     void MovePinned(uint64_t id, int delta) override;
     void ReorderPinned(uint64_t id, int targetIndex) override;
     uint64_t ConvertToPlainText(uint64_t id) override;
+    uint64_t MergeItems(const std::vector<uint64_t>& ids) override;
+    uint64_t CopyTransformed(uint64_t id, transform::Kind kind) override;
+    void PasteTransformed(uint64_t id, transform::Kind kind) override;
+    void PasteAsPlainText(uint64_t id) override;
+    void AddToQueue(const std::vector<uint64_t>& ids) override;
+    int QueuePosition(uint64_t id) const override;
+    void SaveItemAs(uint64_t id) override;
     void OpenSettings() override;
 
     // Snapshot read-only state for crash diagnostics.
@@ -64,6 +76,17 @@ private:
     void ShowAbout();
     void ClearHistory();
 
+    // Backup / restore (.clpw), both one-shot user-initiated modal operations
+    // reached from the tray menu. Export writes Serialize() to a chosen path;
+    // Import merges a chosen backup via Store::ImportMerge (never destructive).
+    void ExportBackup();
+    void ImportBackup();
+
+    // Extract an item's plain text and run one transform over it. Returns false
+    // when the item is gone or carries no transformable text (images, file
+    // lists), so both transform entry points share one guarded extraction path.
+    bool TransformItemText(uint64_t id, transform::Kind kind, std::wstring& out);
+
     // Save state machine
     enum class SaveState {
         NoSaveNeeded,       // No save needed (data is up to date)
@@ -77,10 +100,17 @@ private:
     HWND hwnd_ = nullptr;
     Store store_;
     settings::Config cfg_;
+    blocklist::RuleSet blockRules_;  // Parsed from cfg_.blockRules; rebuilt in ApplyConfig
     hotkey::Manager hotkeys_;
     util::Theme theme_ = {};
     AsyncWriter writer_;
     bool settingsOpen_ = false;
     bool sizeWarned_ = false;
     std::wstring hotkeyFailures_;
+
+    // Sequential paste queue: item ids to paste one-per-hotkey-press, front
+    // first. Runtime-only working state — never persisted, cleared on restart —
+    // so it deliberately does not touch the store format. Stale ids (their item
+    // has since been deleted) are skipped at pop time.
+    std::vector<uint64_t> queue_;
 };

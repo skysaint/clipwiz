@@ -65,6 +65,15 @@ The program lives in the system tray. Click the tray icon to open the quick-past
 | Quick-paste popup | Tray click to open; keyword filtering, number shortcuts, mouse operations |
 | Pin items | Any item can be pinned; pinned items are never auto-deleted and don't count toward history limit |
 | Global hotkeys | Up to 10 pinned positions, each bindable to a global hotkey for instant paste |
+| Full-text search | Filter box matches the entire content of every entry; multiple keywords AND; `kind:` / `app:` tokens narrow by type or source app |
+| Multi-select & merge | Ctrl/Shift-click or Ctrl+A to select several rows; merge them into one entry (text flattens and joins, file lists concatenate) |
+| Text transforms | 13 built-in transforms (trim, case folding, camelCase, slugify, append date/time, …) — copy as a new entry or paste once |
+| Sequential paste queue | Line up several entries and paste them one per press of a dedicated hotkey |
+| Source app tracking | Each entry records the process it was copied from; persisted and searchable via `app:` |
+| App blocklist | Skip capture and/or global hotkeys for chosen processes (e.g. password managers) |
+| Preview desensitization | Optionally mask card / phone / ID numbers, API keys and password fields in previews |
+| Backup & restore | Export the whole history to a `.clpw` file and merge a backup back — deduplicated, pinned-safe, never destructive |
+| Save as file | Save one entry to `.txt` (text) or `.png` (image); file lists are revealed in Explorer |
 | Multi-format | CF_UNICODETEXT / CF_DIB / HTML Format / RTF / CF_HDROP |
 | Persistence | Custom binary format; data survives restarts |
 | Async disk writes | Background thread handles I/O; UI thread never blocks |
@@ -85,6 +94,22 @@ The program lives in the system tray. Click the tray icon to open the quick-past
 ---
 
 ## Version History
+
+### v1.3.0
+
+A large feature release about finding, reshaping and safeguarding clipboard content — still fully offline, single-exe, zero-dependency.
+
+- **Full-text search.** The filter box searches the entire content of every entry (not just the visible preview), ANDs multiple keywords, and supports `kind:text/rich/image/file` and `app:<name>` tokens.
+- **Source app tracking.** Each entry records the process it was copied from — persisted in the store and searchable via `app:`.
+- **App blocklist.** Skip capture and/or global hotkeys for chosen processes (e.g. password managers), per app.
+- **Preview desensitization.** Optional masking of card numbers, phone numbers, national ID numbers, API keys and `password=`-style fields in list rows and hover previews.
+- **Multi-select & merge.** Ctrl/Shift-click and Ctrl+A select several rows; merge them into one entry — text kinds flatten and join, file lists concatenate.
+- **Text transforms.** Thirteen built-in transforms (trim, remove/normalize line breaks, upper/lower/capitalize/sentence/camel/invert case, ASCII-only, slugify, append date/time), applied as a copied new entry or a one-shot paste.
+- **Sequential paste queue.** Queue several entries and paste them one at a time via a dedicated hotkey (default Ctrl+Alt+J).
+- **Backup & restore (.clpw).** Export the whole history to a file and merge a backup back in — deduplicated, pinned-safe, and never destructive on an unreadable file.
+- **Save as file.** Save a single entry to `.txt` (text/HTML/RTF as extracted plain text) or `.png` (image, stored bytes verbatim); file lists are revealed in Explorer.
+- **Paste robustness.** The paste chord is configurable and Ctrl+V is sent by scan code for wider app compatibility; hover preview no longer requires holding Ctrl (configurable).
+- **Headless test suite.** The pure logic — text conversion, filtering, privacy markers, blocklist, masking, merge, transforms and the store — is covered by a `clipwiz_tests` target (800+ checks, no third-party framework).
 
 ### v1.2.0
 
@@ -139,22 +164,35 @@ The program lives in the system tray. Click the tray icon to open the quick-past
 ```
 src/
   main.cpp           Entry, single-instance check, message loop
-  app.h/.cpp         Global state, message dispatch
-  store.h/.cpp       Item database, serialization, eviction
+  app.h/.cpp         Global state, message dispatch, backup / save-as actions
+  store.h/.cpp       Item database, serialization, eviction, import-merge
+  textconv.h/.cpp    HTML/RTF → plain text; canonical form used for deduplication
+  filter.h/.cpp      Popup filter parsing and matching (keywords + tokens)
+  privacy.h/.cpp     Clipboard exclusion markers
+  blocklist.h/.cpp   Per-app capture and hotkey suppression
+  mask.h/.cpp        Preview desensitization (sensitive-span scanners)
+  merge.h/.cpp       Combine selected items into one (text / file-list joins)
+  transform.h/.cpp   Text transforms (case / whitespace / slug / timestamp)
   clipboard.h/.cpp   Clipboard monitoring and read/write
   hotkey.h/.cpp      Global hotkey management
   paste.h/.cpp       Paste execution
   popup.h/.cpp       Quick-paste popup window
   settings.h/.cpp    Configuration and settings dialog
   imagecodec.h/.cpp  WIC image codec
-  tray.h/.cpp        Tray icon
+  tray.h/.cpp        Tray icon and menu
   i18n.h/.cpp        Internationalization
   asyncwriter.h/.cpp Async disk writer
   log.h/.cpp         Lightweight file logging
-  raii.h             RAII wrappers (GlobalLock, HANDLE, GDI objects)
+  raii.h             RAII wrappers (GlobalLock, HANDLE, GDI objects, clipboard open)
   util.h/.cpp        Utility functions
+  resource.h         Control IDs and resource constants
+  clipwiz.rc         Icon, manifest, version info, embedded language pack
 lang/
   zh-CN.lng          Simplified Chinese language pack (compiled into exe at build time)
+tests/
+  testfw.h           Check macros and pass/fail tally — no third-party framework
+  test_main.cpp      Entry; redirects the data directory to a scratch dir
+  test_*.cpp         One per pure unit (textconv, store, filter, privacy, blocklist, mask, merge, transform)
 ```
 
 ---
@@ -178,7 +216,8 @@ clipwiz/
 │   └── variables_win.md  Windows environment variables reference (reserved)
 ├── lang/
 │   └── zh-CN.lng         Simplified Chinese (compiled into exe)
-└── src/                  All source code
+├── src/                  All source code
+└── tests/                Headless unit tests (clipwiz_tests target)
 ```
 
 ---
@@ -251,6 +290,15 @@ cmake --build build --config Release
 | 快速粘贴框 | 单击托盘弹出，支持关键字过滤、序号直选、鼠标操作 |
 | 置顶固定 | 任意条目可置顶，置顶项永不自动删除，不占历史额度 |
 | 全局快捷键 | 置顶区前 10 个位置各可绑定一个全局热键，按下即粘贴 |
+| 全文搜索 | 过滤框匹配每条内容的完整正文（不止预览）；多关键字 AND；`kind:` / `app:` 令牌按类型或来源程序筛选 |
+| 多选与合并 | Ctrl/Shift 单击或 Ctrl+A 选中多行，合并为一条（文本展平拼接，文件列表串联） |
+| 文本变换 | 13 种内置变换（去空白、大小写折叠、驼峰、slug、追加日期时间……）——复制为新条目或一次性粘贴 |
+| 顺序粘贴队列 | 把多条内容排入队列，每按一次专用热键粘贴一条 |
+| 来源程序记录 | 每条内容记录它复制自哪个进程；持久化并可用 `app:` 搜索 |
+| 应用黑名单 | 对指定进程跳过捕获和/或全局热键（如密码管理器） |
+| 预览脱敏 | 可选择在预览中屏蔽银行卡 / 手机号 / 身份证号、API 密钥和密码字段 |
+| 备份与恢复 | 把整个历史导出为 `.clpw` 文件，也可将备份合并回来——去重、保护置顶、绝不破坏现有数据 |
+| 另存为文件 | 把单条内容存为 `.txt`（文本）或 `.png`（图片）；文件列表则在资源管理器中定位 |
 | 多格式支持 | CF_UNICODETEXT / CF_DIB / HTML Format / RTF / CF_HDROP |
 | 持久化 | 自定义二进制格式落盘，重启后数据完整保留 |
 | 异步写盘 | 后台线程执行 I/O，主线程零阻塞 |
@@ -271,6 +319,22 @@ cmake --build build --config Release
 ---
 
 ## 版本历史
+
+### v1.3.0
+
+一次围绕"查找、重塑、守护剪贴板内容"的大版本更新——依旧全程离线、单文件、零依赖。
+
+- **全文搜索。** 过滤框搜索每条内容的完整正文（不止可见预览），多关键字 AND，并支持 `kind:text/rich/image/file` 与 `app:<名称>` 令牌。
+- **来源程序记录。** 每条内容记录它复制自哪个进程——持久化到存储，并可用 `app:` 搜索。
+- **应用黑名单。** 对指定进程跳过捕获和/或全局热键（如密码管理器），按程序分别设置。
+- **预览脱敏。** 可选屏蔽列表行与悬浮预览中的银行卡号、手机号、身份证号、API 密钥以及 `password=` 之类字段。
+- **多选与合并。** Ctrl/Shift 单击与 Ctrl+A 选中多行，合并为一条——文本类展平拼接，文件列表串联。
+- **文本变换。** 13 种内置变换（去空白、删除/规范换行、大写/小写/首字母大写/句首大写/驼峰/反写大小写、仅 ASCII、slug、追加日期时间），可复制为新条目或一次性粘贴。
+- **顺序粘贴队列。** 把多条内容排入队列，通过专用热键（默认 Ctrl+Alt+J）逐条粘贴。
+- **备份与恢复（.clpw）。** 把整个历史导出为文件，也可将备份合并回来——去重、保护置顶，遇到读不出的文件绝不破坏现有数据。
+- **另存为文件。** 把单条内容存为 `.txt`（文本/HTML/RTF 取展平纯文本）或 `.png`（图片，原样写出存储字节）；文件列表则在资源管理器中定位。
+- **粘贴健壮性。** 粘贴组合键可配置，Ctrl+V 以扫描码发送以兼容更多程序；悬浮预览不再需要按住 Ctrl（可配置）。
+- **无界面测试套件。** 纯逻辑——文本转换、过滤、隐私标记、黑名单、脱敏、合并、变换与存储——由 `clipwiz_tests` 目标覆盖（800+ 断言，无第三方框架）。
 
 ### v1.2.0
 
@@ -328,22 +392,35 @@ cmake --build build --config Release
 ```
 src/
   main.cpp           入口、单实例、消息循环
-  app.h/.cpp         全局状态、消息分发
-  store.h/.cpp       条目库、序列化、淘汰
+  app.h/.cpp         全局状态、消息分发、备份 / 另存为动作
+  store.h/.cpp       条目库、序列化、淘汰、导入合并
+  textconv.h/.cpp    HTML/RTF → 纯文本；用于去重的规范化形式
+  filter.h/.cpp      过滤框解析与匹配（关键字 + 令牌）
+  privacy.h/.cpp     剪贴板排除标记
+  blocklist.h/.cpp   按程序的捕获与热键抑制
+  mask.h/.cpp        预览脱敏（敏感片段扫描器）
+  merge.h/.cpp       把选中项合并为一条（文本 / 文件列表拼接）
+  transform.h/.cpp   文本变换（大小写 / 空白 / slug / 时间戳）
   clipboard.h/.cpp   剪贴板监听与读写
   hotkey.h/.cpp      全局热键管理
   paste.h/.cpp       粘贴执行
   popup.h/.cpp       快速粘贴框
   settings.h/.cpp    配置与设置对话框
   imagecodec.h/.cpp  WIC 图片编解码
-  tray.h/.cpp        托盘图标
+  tray.h/.cpp        托盘图标与菜单
   i18n.h/.cpp        国际化
   asyncwriter.h/.cpp 异步写盘
   log.h/.cpp         轻量文件日志
-  raii.h             RAII 封装（GlobalLock、HANDLE、GDI 对象）
+  raii.h             RAII 封装（GlobalLock、HANDLE、GDI 对象、剪贴板打开）
   util.h/.cpp        工具函数
+  resource.h         控件 ID 与资源常量
+  clipwiz.rc         图标、清单、版本信息、内嵌语言包
 lang/
   zh-CN.lng          简体中文语言包（编译时打包进 exe）
+tests/
+  testfw.h           断言宏与通过/失败计数——无第三方框架
+  test_main.cpp      入口；把数据目录重定向到临时目录
+  test_*.cpp         每个纯逻辑单元一个（textconv、store、filter、privacy、blocklist、mask、merge、transform）
 ```
 
 ---
@@ -367,5 +444,6 @@ clipwiz/
 │   └── variables_win.md  Windows 环境变量参考（预留）
 ├── lang/
 │   └── zh-CN.lng         简体中文（编译时打包进 exe）
-└── src/                  全部源码
+├── src/                  全部源码
+└── tests/                无界面单元测试（clipwiz_tests 目标）
 ```

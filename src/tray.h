@@ -16,6 +16,8 @@ enum Command : UINT {
     CmdAutostart = 40004,
     CmdAbout = 40005,
     CmdExit = 40006,
+    CmdExport = 40007,  // Backup the whole history to a user-chosen .clpw file
+    CmdImport = 40008,  // Merge a chosen .clpw backup back into the history
     CmdPinnedBase = 41000,  // Pinned items listed directly in menu, plus index
 };
 

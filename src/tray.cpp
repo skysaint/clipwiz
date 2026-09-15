@@ -118,6 +118,8 @@ UINT ShowMenu(HWND owner, const std::vector<PinnedEntry>& pinned, bool autostart
     AppendMenuW(menu, MF_STRING | (autostartOn ? MF_CHECKED : MF_UNCHECKED), CmdAutostart,
                 i18n::T("tray.autostart"));
     AppendMenuW(menu, MF_STRING, CmdClearHistory, i18n::T("tray.clear_history"));
+    AppendMenuW(menu, MF_STRING, CmdExport, i18n::T("tray.export_backup"));
+    AppendMenuW(menu, MF_STRING, CmdImport, i18n::T("tray.import_backup"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CmdAbout, i18n::T("tray.about"));
     AppendMenuW(menu, MF_STRING, CmdExit, i18n::T("tray.exit"));
