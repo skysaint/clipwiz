@@ -591,7 +591,7 @@ void App::PasteItem(uint64_t id) {
         return;
     }
     popup::Hide();
-    if (!clip::WriteItem(hwnd_, *item)) {
+    if (!clip::WriteItem(hwnd_, *item, cfg_.maxImagePixels)) {
         return;
     }
     store_.Touch(id);
@@ -605,7 +605,7 @@ void App::CopyItem(uint64_t id) {
     if (!item) {
         return;
     }
-    if (!clip::WriteItem(hwnd_, *item)) {
+    if (!clip::WriteItem(hwnd_, *item, cfg_.maxImagePixels)) {
         return;
     }
     store_.Touch(id);
@@ -753,7 +753,7 @@ void App::PasteTransformed(uint64_t id, transform::Kind kind) {
     // window, and history is never modified. Touch() still counts this as a use of
     // the source entry, so it moves to the front exactly like a normal paste.
     popup::Hide();
-    if (!clip::WriteItem(hwnd_, out)) {
+    if (!clip::WriteItem(hwnd_, out, cfg_.maxImagePixels)) {
         return;
     }
     store_.Touch(id);
@@ -779,7 +779,7 @@ void App::PasteAsPlainText(uint64_t id) {
     plain.kind = ItemKind::Text;
     plain.data = std::move(body);
     popup::Hide();
-    if (!clip::WriteItem(hwnd_, plain)) {
+    if (!clip::WriteItem(hwnd_, plain, cfg_.maxImagePixels)) {
         return;
     }
     store_.Touch(id);

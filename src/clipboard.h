@@ -41,7 +41,9 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
              std::wstring& sourceApp, const blocklist::RuleSet& block, uint32_t maxTextBytes,
              uint32_t maxImagePixels);
 
-// Write item content back to system clipboard
-bool WriteItem(HWND owner, const Item& item);
+// Write item content back to system clipboard. maxImagePixels caps the decoded
+// size when the item is an image (0 = no cap); pass the configured capture limit
+// so a crafted/oversized stored PNG cannot force an unbounded allocation on paste.
+bool WriteItem(HWND owner, const Item& item, uint32_t maxImagePixels);
 
 }  // namespace clip

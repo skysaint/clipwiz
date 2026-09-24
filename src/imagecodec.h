@@ -21,8 +21,11 @@ bool DibToPng(const void* dib, size_t dibSize, std::vector<uint8_t>& png, uint32
 bool HBitmapToPng(HBITMAP bitmap, std::vector<uint8_t>& png, uint32_t& width, uint32_t& height);
 
 // PNG byte stream -> two memory blocks for clipboard write (V5 with alpha, plain DIB for legacy)
+// maxPixels caps decoded width*height (0 = no cap) so a crafted/oversized PNG cannot
+// force an unbounded allocation; callers pass the same limit capture enforces.
 bool PngToDibs(const uint8_t* png, size_t size, std::vector<uint8_t>& dibV5,
-               std::vector<uint8_t>& dib, uint32_t& width, uint32_t& height);
+               std::vector<uint8_t>& dib, uint32_t& width, uint32_t& height,
+               uint32_t maxPixels);
 
 // Generate premultiplied-alpha thumbnail from PNG for AlphaBlend; caller owns DeleteObject
 HBITMAP LoadThumbnailFromMemory(const uint8_t* png, size_t size, int maxW, int maxH, int& outW,

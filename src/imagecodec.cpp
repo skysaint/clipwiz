@@ -124,6 +124,14 @@ bool DibToBgra(const void* data, size_t size, std::vector<uint8_t>& bgra, int& w
         return true;
     }
 
+    // Mirror the 32-bit branch: reject a malformed/truncated DIB whose header claims
+    // more pixel data than the buffer actually holds, before handing it to StretchDIBits
+    // (GDI would otherwise read out of bounds and crash on a corrupt clipboard DIB).
+    const size_t srcStride = ((static_cast<size_t>(width) * info.bpp + 31) / 32) * 4;
+    if (info.bitsSize < srcStride * static_cast<size_t>(height)) {
+        return false;
+    }
+
     // Other bit depths converted via GDI, avoiding manual palette/mask decoding
     BITMAPINFO dstInfo{};
     dstInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -222,7 +230,8 @@ bool EncodePng(const uint8_t* bgra, int width, int height, std::vector<uint8_t>&
 }
 
 bool DecodePngMemory(const uint8_t* png, size_t size, std::vector<uint8_t>& bgra, uint32_t& width,
-                     uint32_t& height, bool premultiplied, int maxW, int maxH) {
+                     uint32_t& height, bool premultiplied, int maxW, int maxH,
+                     uint32_t maxPixels) {
     if (!g_factory || !png || size == 0) {
         return false;
     }
@@ -277,6 +286,15 @@ bool DecodePngMemory(const uint8_t* png, size_t size, std::vector<uint8_t>& bgra
         if (dstH == 0) {
             dstH = 1;
         }
+    }
+
+    // Decompression-bomb guard: refuse before allocating width*height*4 bytes.
+    // maxPixels == 0 means "no cap" (the thumbnail path already bounds its output
+    // via maxW/maxH); the paste path passes the same limit capture enforces, so a
+    // crafted/imported PNG cannot force an unbounded allocation and OOM the app.
+    if (maxPixels > 0 &&
+        static_cast<uint64_t>(dstW) * dstH > static_cast<uint64_t>(maxPixels)) {
+        return false;
     }
 
     IWICBitmapSource* source = frame.Get();
@@ -405,9 +423,10 @@ bool HBitmapToPng(HBITMAP bitmap, std::vector<uint8_t>& png, uint32_t& width, ui
 }
 
 bool PngToDibs(const uint8_t* png, size_t size, std::vector<uint8_t>& dibV5,
-               std::vector<uint8_t>& dib, uint32_t& width, uint32_t& height) {
+               std::vector<uint8_t>& dib, uint32_t& width, uint32_t& height,
+               uint32_t maxPixels) {
     std::vector<uint8_t> bgra;
-    if (!DecodePngMemory(png, size, bgra, width, height, false, 0, 0)) {
+    if (!DecodePngMemory(png, size, bgra, width, height, false, 0, 0, maxPixels)) {
         return false;
     }
     const size_t imageBytes = bgra.size();
@@ -446,7 +465,7 @@ HBITMAP LoadThumbnailFromMemory(const uint8_t* png, size_t size, int maxW, int m
     std::vector<uint8_t> pbgra;
     uint32_t w = 0;
     uint32_t h = 0;
-    if (!DecodePngMemory(png, size, pbgra, w, h, true, maxW, maxH)) {
+    if (!DecodePngMemory(png, size, pbgra, w, h, true, maxW, maxH, 0)) {
         return nullptr;
     }
 

@@ -206,12 +206,12 @@ bool SetUnicodeText(const std::wstring& text) {
     return true;
 }
 
-bool SetImagePng(const std::vector<uint8_t>& png) {
+bool SetImagePng(const std::vector<uint8_t>& png, uint32_t maxPixels) {
     std::vector<uint8_t> dibV5;
     std::vector<uint8_t> dib;
     uint32_t w = 0;
     uint32_t h = 0;
-    if (!imagecodec::PngToDibs(png.data(), png.size(), dibV5, dib, w, h)) {
+    if (!imagecodec::PngToDibs(png.data(), png.size(), dibV5, dib, w, h, maxPixels)) {
         return false;
     }
     bool ok = false;
@@ -616,7 +616,7 @@ bool Capture(ItemKind& kind, std::vector<uint8_t>& data, uint32_t& imgW, uint32_
     return got;
 }
 
-bool WriteItem(HWND owner, const Item& item) {
+bool WriteItem(HWND owner, const Item& item, uint32_t maxImagePixels) {
     EnsureFormats();
     raii::ClipboardOpenGuard clip(owner);
     if (!clip) {
@@ -633,7 +633,7 @@ bool WriteItem(HWND owner, const Item& item) {
             break;
         }
         case ItemKind::Image:
-            ok = SetImagePng(item.data);
+            ok = SetImagePng(item.data, maxImagePixels);
             break;
         case ItemKind::Html: {
             ok = SetFormatBytes(g_fmtHtml, item.data.data(), item.data.size());
