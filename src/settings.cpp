@@ -1,9 +1,11 @@
-// settings.cpp — Settings dialog: single centered window with grouped sections
+// settings.cpp — 原有设置分组改为 Tab，保持页内控件布局与行为
 #include "settings.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <windowsx.h>
+#include <array>
 
 #include "resource.h"
 
@@ -35,6 +37,27 @@ HWND g_settingsDlg = nullptr;
 int g_dpi = 96;
 HICON g_winKeyIcon = nullptr;
 HWND g_tooltip = nullptr;
+
+enum PageIndex { General, Shortcuts, Privacy, PageCount };
+struct PageControl {
+    HWND hwnd;
+    RECT bounds;  // 原有布局的 DIP 坐标，不随滚动或 DPI 变化累积误差。
+};
+struct Page {
+    HWND hwnd = nullptr;
+    std::vector<PageControl> controls;
+    int contentHeight = 0;
+    int scrollX = 0;
+    int scrollY = 0;
+    int wheelDelta = 0;
+};
+std::array<Page, PageCount> g_pages;
+HWND g_tabs = nullptr;
+int g_activePage = General;
+bool g_layout = false;
+bool g_pagesReady = false;
+constexpr UINT kEnsureFocus = WM_APP + 31;
+LRESULT CALLBACK ControlProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 // Lazily create the shared tooltip control (owned by the dialog) and return it.
 HWND EnsureTooltip(HWND owner) {
@@ -80,6 +103,13 @@ HWND MakeCtrl(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style,
     if (hwnd && g_font) {
         SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
     }
+    for (Page& page : g_pages) {
+        if (hwnd && page.hwnd == parent) {
+            page.controls.push_back({hwnd, {x, y, x + w, y + h}});
+            if (style & WS_TABSTOP) SetWindowSubclass(hwnd, ControlProc, 1, 0);
+            break;
+        }
+    }
     return hwnd;
 }
 
@@ -122,7 +152,217 @@ int MakeGroupHeader(HWND parent, const wchar_t* text, int y, int width) {
     return y + 22;
 }
 
+// 保存和事件处理仅改为查找控件所属页，不改变原有设置行为。
+HWND SettingParent(int id) {
+    for (const Page& page : g_pages)
+        if (GetDlgItem(page.hwnd, id)) return page.hwnd;
+    return nullptr;
+}
+
+void ScrollPage(Page& page, int x, int y) {
+    RECT client{};
+    GetClientRect(page.hwnd, &client);
+    page.scrollX = std::clamp(x, 0, std::max(0, Dip(590) - static_cast<int>(client.right)));
+    page.scrollY = std::clamp(y, 0, std::max(0, Dip(page.contentHeight) - static_cast<int>(client.bottom)));
+    for (const PageControl& ctrl : page.controls) {
+        const RECT& rc = ctrl.bounds;
+        SetWindowPos(ctrl.hwnd, nullptr, Dip(rc.left) - page.scrollX, Dip(rc.top) - page.scrollY,
+                     Dip(rc.right - rc.left), Dip(rc.bottom - rc.top), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    SetScrollPos(page.hwnd, SB_HORZ, page.scrollX, TRUE);
+    SetScrollPos(page.hwnd, SB_VERT, page.scrollY, TRUE);
+    InvalidateRect(page.hwnd, nullptr, TRUE);
+}
+
+void EnsureVisible(HWND ctrl) {
+    Page& page = g_pages[g_activePage];
+    if (!ctrl || GetParent(ctrl) != page.hwnd) return;
+    RECT rc{}, client{};
+    GetWindowRect(ctrl, &rc);
+    MapWindowPoints(HWND_DESKTOP, page.hwnd, reinterpret_cast<POINT*>(&rc), 2);
+    GetClientRect(page.hwnd, &client);
+    int x = page.scrollX, y = page.scrollY;
+    if (rc.left < 0) x += rc.left;
+    else if (rc.right > client.right) x += rc.right - client.right;
+    if (rc.top < 0) y += rc.top;
+    else if (rc.bottom > client.bottom) y += rc.bottom - client.bottom;
+    if (x != page.scrollX || y != page.scrollY) ScrollPage(page, x, y);
+}
+
+LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_SETFOCUS)
+        PostMessageW(g_settingsDlg, kEnsureFocus, reinterpret_cast<WPARAM>(hwnd), 0);
+    // 不截获键盘输入，保留热键控件原来的录制行为。
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+INT_PTR CALLBACK PageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND) return SendMessageW(GetParent(hwnd), msg, wp, lp);
+    Page* page = nullptr;
+    for (Page& p : g_pages) if (p.hwnd == hwnd) page = &p;
+    if (!page) return FALSE;
+    if (msg == WM_VSCROLL || msg == WM_HSCROLL) {
+        const bool vertical = msg == WM_VSCROLL;
+        SCROLLINFO si{sizeof(si), SIF_ALL};
+        GetScrollInfo(hwnd, vertical ? SB_VERT : SB_HORZ, &si);
+        int pos = vertical ? page->scrollY : page->scrollX;
+        switch (LOWORD(wp)) {
+            case SB_TOP: pos = 0; break;
+            case SB_BOTTOM: pos = si.nMax; break;
+            case SB_LINEUP: pos -= Dip(28); break;
+            case SB_LINEDOWN: pos += Dip(28); break;
+            case SB_PAGEUP: pos -= static_cast<int>(si.nPage); break;
+            case SB_PAGEDOWN: pos += static_cast<int>(si.nPage); break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        }
+        ScrollPage(*page, vertical ? page->scrollX : pos, vertical ? pos : page->scrollY);
+        return TRUE;
+    }
+    if (msg == WM_MOUSEWHEEL) {
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        page->wheelDelta += GET_WHEEL_DELTA_WPARAM(wp);
+        const int steps = page->wheelDelta / WHEEL_DELTA;
+        page->wheelDelta %= WHEEL_DELTA;
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        int distance = lines == WHEEL_PAGESCROLL ? static_cast<int>(rc.bottom)
+                                               : Dip(20) * static_cast<int>(lines);
+        ScrollPage(*page, page->scrollX, page->scrollY - steps * distance);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void LayoutDialog(HWND hwnd) {
+    if (!g_pagesReady || g_layout) return;
+    g_layout = true;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int pad = Dip(12), footer = Dip(50);
+    // 同级页签置底，避免页签背景遮住内容；页面内的布局完全沿用原版。
+    SetWindowPos(g_tabs, HWND_BOTTOM, pad, pad, rc.right - 2 * pad, rc.bottom - pad - footer,
+                 SWP_NOACTIVATE);
+    RECT area{};
+    GetClientRect(g_tabs, &area);
+    TabCtrl_AdjustRect(g_tabs, FALSE, &area);
+    MapWindowPoints(g_tabs, hwnd, reinterpret_cast<POINT*>(&area), 2);
+    const int width = area.right - area.left, height = area.bottom - area.top;
+    for (Page& page : g_pages) {
+        SetWindowPos(page.hwnd, nullptr, area.left, area.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        bool horizontal = false, vertical = false;
+        int viewW = width, viewH = height;
+        for (int pass = 0; pass < 3; ++pass) {
+            horizontal = Dip(590) > viewW;
+            vertical = Dip(page.contentHeight) > viewH;
+            viewW = width - (vertical ? GetSystemMetricsForDpi(SM_CXVSCROLL, g_dpi) : 0);
+            viewH = height - (horizontal ? GetSystemMetricsForDpi(SM_CYHSCROLL, g_dpi) : 0);
+        }
+        SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
+        si.nMax = Dip(590) - 1;
+        si.nPage = static_cast<UINT>(std::max(1, viewW));
+        si.nPos = page.scrollX;
+        SetScrollInfo(page.hwnd, SB_HORZ, &si, TRUE);
+        si.nMax = Dip(page.contentHeight) - 1;
+        si.nPage = static_cast<UINT>(std::max(1, viewH));
+        si.nPos = page.scrollY;
+        SetScrollInfo(page.hwnd, SB_VERT, &si, TRUE);
+        ScrollPage(page, page.scrollX, page.scrollY);
+    }
+    // 保留原有居中按钮、宽高和按钮间距，仅固定在页签容器下方。
+    for (int i = 0; i < 2; ++i)
+        SetWindowPos(GetDlgItem(hwnd, i == 0 ? IDOK : IDCANCEL), nullptr,
+                     (rc.right - Dip(182)) / 2 + i * Dip(97), rc.bottom - pad - Dip(26), Dip(85), Dip(26),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    g_layout = false;
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
+
+void SelectPage(int index) {
+    if (index < 0 || index >= PageCount) return;
+    HWND focus = GetFocus();
+    bool moveFocus = IsChild(g_pages[g_activePage].hwnd, focus);
+    if (moveFocus) SetFocus(g_tabs);
+    g_activePage = index;
+    TabCtrl_SetCurSel(g_tabs, index);
+    for (int i = 0; i < PageCount; ++i) ShowWindow(g_pages[i].hwnd, i == index ? SW_SHOW : SW_HIDE);
+    if (moveFocus) {
+        HWND next = GetNextDlgTabItem(g_pages[index].hwnd, nullptr, FALSE);
+        if (next) SetFocus(next);
+    }
+}
+
+void RecreateFonts(HWND hwnd) {
+    HFONT oldFont = g_font, oldBold = g_fontBold;
+    NONCLIENTMETRICSW ncm{sizeof(ncm)};
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, static_cast<UINT>(g_dpi));
+    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    ncm.lfMessageFont.lfWeight = FW_BOLD;
+    g_fontBold = CreateFontIndirectW(&ncm.lfMessageFont);
+    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
+    if (g_pagesReady) {
+        SendMessageW(g_tabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
+        SendDlgItemMessageW(hwnd, IDOK, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
+        SendDlgItemMessageW(hwnd, IDCANCEL, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
+        g_winKeyIcon = nullptr;
+        for (Page& page : g_pages) {
+            for (const PageControl& ctrl : page.controls) {
+                bool bold = reinterpret_cast<HFONT>(SendMessageW(ctrl.hwnd, WM_GETFONT, 0, 0)) == oldBold;
+                SendMessageW(ctrl.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(bold ? g_fontBold : g_font), FALSE);
+                int id = GetDlgCtrlID(ctrl.hwnd);
+                if (id == IDC_POPUP_WIN || id == IDC_QUEUE_WIN || (id >= IDC_PIN_WIN_BASE && id < IDC_PIN_WIN_BASE + 10))
+                    SendMessageW(ctrl.hwnd, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(LoadWinKeyIcon()));
+            }
+        }
+        LayoutDialog(hwnd);
+    }
+    if (oldFont) DeleteObject(oldFont);
+    if (oldBold) DeleteObject(oldBold);
+}
+
+void FitDialog(HWND hwnd, const RECT* suggested = nullptr) {
+    RECT current{};
+    GetWindowRect(hwnd, &current);
+    if (suggested) current = *suggested;
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromRect(&current, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT frame{0, 0, Dip(622), Dip(420)};
+    AdjustWindowRectExForDpi(&frame, GetWindowLongW(hwnd, GWL_STYLE), FALSE,
+                             GetWindowLongW(hwnd, GWL_EXSTYLE), static_cast<UINT>(g_dpi));
+    int margin = Dip(8);
+    int w = std::min(static_cast<int>(frame.right - frame.left), static_cast<int>(mi.rcWork.right - mi.rcWork.left) - margin * 2);
+    int h = std::min(static_cast<int>(frame.bottom - frame.top), static_cast<int>(mi.rcWork.bottom - mi.rcWork.top) - margin * 2);
+    int x = suggested ? current.left : mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2;
+    int y = suggested ? current.top : mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - h) / 2;
+    x = std::clamp(x, static_cast<int>(mi.rcWork.left) + margin, static_cast<int>(mi.rcWork.right) - margin - w);
+    y = std::clamp(y, static_cast<int>(mi.rcWork.top) + margin, static_cast<int>(mi.rcWork.bottom) - margin - h);
+    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 void PopulateControls(HWND hwnd) {
+    HWND dialog = hwnd;
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TAB_CLASSES | ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&icc);
+    g_tabs = MakeCtrl(dialog, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS,
+                      12, 12, 598, 358, IDC_SETTINGS_TABS);
+    const char* titles[] = {"settings.tab.general", "settings.tab.shortcuts", "settings.tab.privacy"};
+    struct EmptyPage { DLGTEMPLATE dlg; WORD menu, cls, title; };
+    for (int i = 0; i < PageCount; ++i) {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(i18n::T(titles[i]));
+        TabCtrl_InsertItem(g_tabs, i, &item);
+        EmptyPage tmpl{};
+        tmpl.dlg.style = WS_CHILD | DS_CONTROL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        tmpl.dlg.dwExtendedStyle = WS_EX_CONTROLPARENT;
+        g_pages[i].hwnd = CreateDialogIndirectParamW(GetModuleHandleW(nullptr), &tmpl.dlg, dialog, PageProc, 0);
+        if (!g_tabs || !g_pages[i].hwnd) {
+            EndDialog(dialog, IDCANCEL);
+            return;
+        }
+        SetDialogDpiChangeBehavior(g_pages[i].hwnd, DDC_DISABLE_ALL, DDC_DISABLE_ALL);
+    }
+    hwnd = g_pages[General].hwnd;
     const Config& cfg = *g_cfg;
 
     // Layout constants (DIP) — generous sizing for readability
@@ -270,6 +510,10 @@ void PopulateControls(HWND hwnd) {
              BS_PUSHBUTTON | WS_TABSTOP, kFieldX + kFieldW + 6, y, kActionBtnW, kEditH, IDC_FONT_RESET);
     y += kRowH + 8;
 
+    g_pages[General].contentHeight = y;
+    hwnd = g_pages[Shortcuts].hwnd;
+    y = kPad;
+
     // ===================== Section 2: Shortcuts =====================
     y = MakeGroupHeader(hwnd, i18n::T("settings.tab.shortcuts"), y, kGroupW);
 
@@ -333,6 +577,10 @@ void PopulateControls(HWND hwnd) {
     }
     y += 5 * kHkRowH + 10;
 
+    g_pages[Shortcuts].contentHeight = y;
+    hwnd = g_pages[Privacy].hwnd;
+    y = kPad;
+
     // ===================== Section 3: Privacy =====================
     y = MakeGroupHeader(hwnd, i18n::T("settings.tab.privacy"), y, kGroupW);
 
@@ -379,30 +627,15 @@ void PopulateControls(HWND hwnd) {
     maskCheck(0, 2, IDC_MASK_APIKEY,   i18n::T("settings.mask_apikey"),   cfg.mask.apiKey);
     y += 3 * 22 + kPad;
 
-    // ===================== Footer: OK / Cancel =====================
-    int btnW = 85;
-    int footBtnH = 26;
-    int btnY = y;
-    int btnX = (kDlgW - btnW * 2 - 12) / 2;
-    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.ok"),
-             BS_DEFPUSHBUTTON | WS_TABSTOP, btnX, btnY, btnW, footBtnH, IDOK);
-    MakeCtrl(hwnd, L"BUTTON", i18n::T("settings.cancel"),
-             BS_PUSHBUTTON | WS_TABSTOP, btnX + btnW + 12, btnY, btnW, footBtnH, IDCANCEL);
-    y += footBtnH + kPad;
-
-    // Resize dialog to fit content
-    RECT rcClient = {0, 0, Dip(kDlgW), Dip(y)};
-    AdjustWindowRectEx(&rcClient, GetWindowLongW(hwnd, GWL_STYLE), FALSE,
-                       GetWindowLongW(hwnd, GWL_EXSTYLE));
-    int dlgW = rcClient.right - rcClient.left;
-    int dlgH = rcClient.bottom - rcClient.top;
-
-    // Center on screen
-    RECT workArea;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
-    int screenCx = workArea.left + (workArea.right - workArea.left - dlgW) / 2;
-    int screenCy = workArea.top + (workArea.bottom - workArea.top - dlgH) / 2;
-    SetWindowPos(hwnd, nullptr, screenCx, screenCy, dlgW, dlgH, SWP_NOZORDER);
+    g_pages[Privacy].contentHeight = y;
+    MakeCtrl(dialog, L"BUTTON", i18n::T("settings.ok"),
+             BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 0, 85, 26, IDOK);
+    MakeCtrl(dialog, L"BUTTON", i18n::T("settings.cancel"),
+             BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 85, 26, IDCANCEL);
+    g_pagesReady = true;
+    FitDialog(dialog);
+    LayoutDialog(dialog);
+    SelectPage(General);
 }
 
 // Validate the shortcuts before any of them is committed. The OK handler reads
@@ -473,11 +706,54 @@ bool HotkeysAcceptable(HWND hwnd, uint32_t popup, uint32_t queue,
 }
 
 INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    (void)lparam;
     switch (msg) {
-        case WM_INITDIALOG:
+        case WM_INITDIALOG: {
             g_settingsDlg = hwnd;
+            SetDialogDpiChangeBehavior(hwnd, DDC_DISABLE_ALL, DDC_DISABLE_ALL);
+            // 托盘宿主是隐藏窗口；设置应在用户当前操作的显示器打开。
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            SetWindowPos(hwnd, nullptr, cursor.x, cursor.y, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            g_dpi = util::DpiOf(hwnd);
+            RecreateFonts(hwnd);
             PopulateControls(hwnd);
+            SetFocus(g_tabs);
+            return FALSE;
+        }
+        case WM_SIZE:
+            LayoutDialog(hwnd);
+            return TRUE;
+        case WM_DPICHANGED:
+            if (g_tabs) {
+                int oldDpi = g_dpi;
+                g_dpi = HIWORD(wparam);
+                for (Page& page : g_pages) {
+                    page.scrollX = MulDiv(page.scrollX, g_dpi, oldDpi);
+                    page.scrollY = MulDiv(page.scrollY, g_dpi, oldDpi);
+                }
+                RecreateFonts(hwnd);
+                FitDialog(hwnd, reinterpret_cast<const RECT*>(lparam));
+                EnsureVisible(GetFocus());
+            }
+            return TRUE;
+        case WM_DISPLAYCHANGE:
+        case WM_SETTINGCHANGE:
+            if (g_tabs) FitDialog(hwnd);
+            return TRUE;
+        case WM_NOTIFY: {
+            const auto* hdr = reinterpret_cast<const NMHDR*>(lparam);
+            if (hdr->hwndFrom == g_tabs && hdr->code == TCN_SELCHANGE) {
+                SelectPage(TabCtrl_GetCurSel(g_tabs));
+                return TRUE;
+            }
+            break;
+        }
+        case kEnsureFocus:
+            if (GetFocus() == reinterpret_cast<HWND>(wparam)) EnsureVisible(GetFocus());
+            return TRUE;
+        case WM_MOUSEWHEEL:
+            SendMessageW(g_pages[g_activePage].hwnd, msg, wparam, lparam);
             return TRUE;
         case WM_COMMAND: {
             int id = LOWORD(wparam);
@@ -489,21 +765,22 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 // this dialog. On failure keep the dialog open (return TRUE) with
                 // cfg untouched so the user can fix the combination.
                 WORD raw = static_cast<WORD>(
-                    SendDlgItemMessageW(hwnd, IDC_POPUP_HK, HKM_GETHOTKEY, 0, 0));
-                bool win = IsDlgButtonChecked(hwnd, IDC_POPUP_WIN) == BST_CHECKED;
+                    SendDlgItemMessageW(SettingParent(IDC_POPUP_HK), IDC_POPUP_HK, HKM_GETHOTKEY, 0, 0));
+                bool win = IsDlgButtonChecked(SettingParent(IDC_POPUP_WIN), IDC_POPUP_WIN) == BST_CHECKED;
                 uint32_t popupHk = hotkey::FromControl(raw, win);
                 WORD qraw = static_cast<WORD>(
-                    SendDlgItemMessageW(hwnd, IDC_QUEUE_HK, HKM_GETHOTKEY, 0, 0));
-                bool qwin = IsDlgButtonChecked(hwnd, IDC_QUEUE_WIN) == BST_CHECKED;
+                    SendDlgItemMessageW(SettingParent(IDC_QUEUE_HK), IDC_QUEUE_HK, HKM_GETHOTKEY, 0, 0));
+                bool qwin = IsDlgButtonChecked(SettingParent(IDC_QUEUE_WIN), IDC_QUEUE_WIN) == BST_CHECKED;
                 uint32_t queueHk = hotkey::FromControl(qraw, qwin);
                 uint32_t pinnedHk[10] = {};
                 for (int i = 0; i < 10; ++i) {
                     WORD r = static_cast<WORD>(
-                        SendDlgItemMessageW(hwnd, IDC_PIN_HK_BASE + i, HKM_GETHOTKEY, 0, 0));
-                    bool w = IsDlgButtonChecked(hwnd, IDC_PIN_WIN_BASE + i) == BST_CHECKED;
+                        SendDlgItemMessageW(SettingParent(IDC_PIN_HK_BASE + i), IDC_PIN_HK_BASE + i, HKM_GETHOTKEY, 0, 0));
+                    bool w = IsDlgButtonChecked(SettingParent(IDC_PIN_WIN_BASE + i), IDC_PIN_WIN_BASE + i) == BST_CHECKED;
                     pinnedHk[i] = hotkey::FromControl(r, w);
                 }
                 if (!HotkeysAcceptable(hwnd, popupHk, queueHk, pinnedHk)) {
+                    SelectPage(Shortcuts);
                     return TRUE;
                 }
                 cfg.popupHotkey = popupHk;
@@ -511,27 +788,27 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 for (int i = 0; i < 10; ++i) {
                     cfg.pinnedHotkeys[i] = pinnedHk[i];
                 }
-                cfg.maxHistory = GetDlgItemInt(hwnd, IDC_MAXHISTORY, nullptr, FALSE);
-                cfg.expiryDays = GetDlgItemInt(hwnd, IDC_EXPIRYDAYS, nullptr, FALSE);
-                cfg.cleanOnExit = IsDlgButtonChecked(hwnd, IDC_CLEAN_ON_EXIT) == BST_CHECKED;
-                cfg.hoverPreview = IsDlgButtonChecked(hwnd, IDC_HOVER_PREVIEW) == BST_CHECKED;
+                cfg.maxHistory = GetDlgItemInt(SettingParent(IDC_MAXHISTORY), IDC_MAXHISTORY, nullptr, FALSE);
+                cfg.expiryDays = GetDlgItemInt(SettingParent(IDC_EXPIRYDAYS), IDC_EXPIRYDAYS, nullptr, FALSE);
+                cfg.cleanOnExit = IsDlgButtonChecked(SettingParent(IDC_CLEAN_ON_EXIT), IDC_CLEAN_ON_EXIT) == BST_CHECKED;
+                cfg.hoverPreview = IsDlgButtonChecked(SettingParent(IDC_HOVER_PREVIEW), IDC_HOVER_PREVIEW) == BST_CHECKED;
                 int langSel = static_cast<int>(
-                    SendMessageW(GetDlgItem(hwnd, IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
+                    SendMessageW(GetDlgItem(SettingParent(IDC_LANGUAGE), IDC_LANGUAGE), CB_GETCURSEL, 0, 0));
                 if (langSel == 1) cfg.language = L"en";
                 else if (langSel == 2) cfg.language = L"zh-CN";
                 else cfg.language = L"";
                 cfg.theme = static_cast<ThemeMode>(
-                    SendMessageW(GetDlgItem(hwnd, IDC_THEME), CB_GETCURSEL, 0, 0));
+                    SendMessageW(GetDlgItem(SettingParent(IDC_THEME), IDC_THEME), CB_GETCURSEL, 0, 0));
                 cfg.popupPosition = static_cast<int>(
-                    SendMessageW(GetDlgItem(hwnd, IDC_POPUPPOS), CB_GETCURSEL, 0, 0));
-                bool autostart = IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED;
+                    SendMessageW(GetDlgItem(SettingParent(IDC_POPUPPOS), IDC_POPUPPOS), CB_GETCURSEL, 0, 0));
+                bool autostart = IsDlgButtonChecked(SettingParent(IDC_AUTOSTART), IDC_AUTOSTART) == BST_CHECKED;
                 // CB_GETCURSEL returns -1 when nothing is selected; Clamp()
                 // turns that back into the default rather than storing it.
                 cfg.pasteKey = static_cast<paste::Key>(
-                    SendMessageW(GetDlgItem(hwnd, IDC_PASTE_KEY), CB_GETCURSEL, 0, 0));
+                    SendMessageW(GetDlgItem(SettingParent(IDC_PASTE_KEY), IDC_PASTE_KEY), CB_GETCURSEL, 0, 0));
                 // Blocklist rules: strip the CR the edit control adds, store LF.
                 {
-                    HWND edBlock = GetDlgItem(hwnd, IDC_BLOCKLIST);
+                    HWND edBlock = GetDlgItem(SettingParent(IDC_BLOCKLIST), IDC_BLOCKLIST);
                     const int len = GetWindowTextLengthW(edBlock);
                     std::wstring text;
                     if (len > 0) {
@@ -547,23 +824,23 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     cfg.blockRules = lf;
                 }
                 // Preview desensitization toggles
-                cfg.mask.phone = IsDlgButtonChecked(hwnd, IDC_MASK_PHONE) == BST_CHECKED;
-                cfg.mask.idCard = IsDlgButtonChecked(hwnd, IDC_MASK_IDCARD) == BST_CHECKED;
-                cfg.mask.password = IsDlgButtonChecked(hwnd, IDC_MASK_PASSWORD) == BST_CHECKED;
-                cfg.mask.email = IsDlgButtonChecked(hwnd, IDC_MASK_EMAIL) == BST_CHECKED;
-                cfg.mask.apiKey = IsDlgButtonChecked(hwnd, IDC_MASK_APIKEY) == BST_CHECKED;
+                cfg.mask.phone = IsDlgButtonChecked(SettingParent(IDC_MASK_PHONE), IDC_MASK_PHONE) == BST_CHECKED;
+                cfg.mask.idCard = IsDlgButtonChecked(SettingParent(IDC_MASK_IDCARD), IDC_MASK_IDCARD) == BST_CHECKED;
+                cfg.mask.password = IsDlgButtonChecked(SettingParent(IDC_MASK_PASSWORD), IDC_MASK_PASSWORD) == BST_CHECKED;
+                cfg.mask.email = IsDlgButtonChecked(SettingParent(IDC_MASK_EMAIL), IDC_MASK_EMAIL) == BST_CHECKED;
+                cfg.mask.apiKey = IsDlgButtonChecked(SettingParent(IDC_MASK_APIKEY), IDC_MASK_APIKEY) == BST_CHECKED;
                 // Merge separator: mode from the combo, literal from the custom
                 // field. CB_GETCURSEL is -1 if nothing is selected; Clamp()
                 // restores the default. The custom edit is single-line, so there
                 // is no CR to strip and nothing that could break the ini format.
                 cfg.mergeSep = static_cast<merge::Separator>(
-                    SendDlgItemMessageW(hwnd, IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
+                    SendDlgItemMessageW(SettingParent(IDC_MERGE_SEP), IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
                 wchar_t mergeCustom[64] = {};
-                GetDlgItemTextW(hwnd, IDC_MERGE_SEP_CUSTOM, mergeCustom, 64);
+                GetDlgItemTextW(SettingParent(IDC_MERGE_SEP_CUSTOM), IDC_MERGE_SEP_CUSTOM, mergeCustom, 64);
                 cfg.mergeSepCustom = mergeCustom;
                 // Data storage mode migration (must succeed before committing)
                 int dataSel = static_cast<int>(
-                    SendDlgItemMessageW(hwnd, IDC_DATADIR, CB_GETCURSEL, 0, 0));
+                    SendDlgItemMessageW(SettingParent(IDC_DATADIR), IDC_DATADIR, CB_GETCURSEL, 0, 0));
                 bool wantPortable = (dataSel == 1);
                 if (wantPortable != util::IsPortable()) {
                     if (!util::MigrateDataDir(wantPortable, hwnd)) {
@@ -611,13 +888,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 g_cfg->fontSize = cf.iPointSize / 10;
                 std::wstring t = util::Format(L"%s  %dpt",
                                               g_cfg->fontName.c_str(), g_cfg->fontSize);
-                SetDlgItemTextW(hwnd, IDC_FONT_BTN, t.c_str());
+                SetDlgItemTextW(SettingParent(IDC_FONT_BTN), IDC_FONT_BTN, t.c_str());
                 return TRUE;
             }
             if (id == IDC_FONT_RESET) {
                 g_cfg->fontName.clear();
                 g_cfg->fontSize = 0;
-                SetDlgItemTextW(hwnd, IDC_FONT_BTN, i18n::T("settings.font_default_val"));
+                SetDlgItemTextW(SettingParent(IDC_FONT_BTN), IDC_FONT_BTN, i18n::T("settings.font_default_val"));
                 return TRUE;
             }
             if (id == IDC_DATADIR_OPEN) {
@@ -625,16 +902,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 return TRUE;
             }
             if (id == IDC_CLEAN_ON_EXIT) {
-                bool checked = IsDlgButtonChecked(hwnd, IDC_CLEAN_ON_EXIT) == BST_CHECKED;
-                EnableWindow(GetDlgItem(hwnd, IDC_EXPIRYDAYS), !checked);
+                bool checked = IsDlgButtonChecked(SettingParent(IDC_CLEAN_ON_EXIT), IDC_CLEAN_ON_EXIT) == BST_CHECKED;
+                EnableWindow(GetDlgItem(SettingParent(IDC_EXPIRYDAYS), IDC_EXPIRYDAYS), !checked);
                 return TRUE;
             }
             if (id == IDC_MERGE_SEP) {
                 // The custom field is only meaningful in Custom mode; grey it out
                 // for the three presets so it is clear their separator is fixed.
                 const int sel = static_cast<int>(
-                    SendDlgItemMessageW(hwnd, IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
-                EnableWindow(GetDlgItem(hwnd, IDC_MERGE_SEP_CUSTOM),
+                    SendDlgItemMessageW(SettingParent(IDC_MERGE_SEP), IDC_MERGE_SEP, CB_GETCURSEL, 0, 0));
+                EnableWindow(GetDlgItem(SettingParent(IDC_MERGE_SEP_CUSTOM), IDC_MERGE_SEP_CUSTOM),
                              sel == static_cast<int>(merge::Separator::Custom));
                 return TRUE;
             }
@@ -645,6 +922,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             return TRUE;
         case WM_DESTROY:
             g_settingsDlg = nullptr;
+            g_pagesReady = false;
+            g_tabs = nullptr;
+            g_pages = {};
             if (g_tooltip) { DestroyWindow(g_tooltip); g_tooltip = nullptr; }
             if (g_font) { DeleteObject(g_font); g_font = nullptr; }
             if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = nullptr; }
@@ -656,7 +936,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 // Build minimal in-memory DLGTEMPLATE (no controls, we add them in WM_INITDIALOG)
 std::vector<WORD> BuildEmptyDlgTemplate() {
     std::vector<WORD> buf;
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | DS_MODALFRAME | DS_SETFONT;
     buf.push_back(LOWORD(style));
     buf.push_back(HIWORD(style));
     buf.push_back(0); buf.push_back(0);  // dwExtendedStyle
@@ -908,16 +1188,12 @@ bool ShowDialog(HWND owner, HINSTANCE inst, Config& cfg) {
 
     g_cfg = &cfg;
     g_resultOk = false;
-    g_dpi = owner ? util::DpiOf(owner) : util::DpiOf(nullptr);
-
-    // Create fonts
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof(ncm);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0,
-                               static_cast<UINT>(g_dpi));
-    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
-    ncm.lfMessageFont.lfWeight = FW_BOLD;
-    g_fontBold = CreateFontIndirectW(&ncm.lfMessageFont);
+    g_pages = {};
+    g_tabs = nullptr;
+    g_activePage = General;
+    g_layout = false;
+    g_pagesReady = false;
+    g_winKeyIcon = nullptr;
 
     // Build in-memory dialog template
     std::vector<WORD> tmpl = BuildEmptyDlgTemplate();

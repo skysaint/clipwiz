@@ -21,6 +21,9 @@
 // Built-in language resources (compiled from lang/*.lng)
 #define IDR_LNG_ZHCN                2001
 
+// 设置页签控件
+#define IDC_SETTINGS_TABS          1090
+
 // Settings dialog pages
 #define IDD_PAGE_GENERAL            201
 #define IDD_PAGE_TYPES              202
